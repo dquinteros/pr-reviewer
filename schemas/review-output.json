@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "A concise overall summary of the PR review findings."
+    },
+    "findings": {
+      "type": "array",
+      "description": "List of specific issues or suggestions found in the code.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Relative file path from the repository root."
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line number where the finding applies."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "warning", "suggestion", "nitpick"],
+            "description": "Severity level of the finding."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short title summarizing the finding."
+          },
+          "body": {
+            "type": "string",
+            "description": "Detailed explanation of the issue."
+          },
+          "suggestion": {
+            "type": "string",
+            "description": "Suggested replacement code for the affected lines. Use empty string if no concrete fix."
+          }
+        },
+        "required": ["file", "line", "severity", "title", "body", "suggestion"],
+        "additionalProperties": false
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "request_changes", "comment"],
+      "description": "Overall verdict: approve if code is good, request_changes for must-fix issues, comment otherwise."
+    }
+  },
+  "required": ["summary", "findings", "verdict"],
+  "additionalProperties": false
+}
