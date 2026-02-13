@@ -73,8 +73,14 @@ export async function detectProject(repoDir: string): Promise<ProjectConfig> {
       (await fileExists(repoDir, ".eslintrc.json")) ||
       (await fileExists(repoDir, ".eslintrc.js")) ||
       (await fileExists(repoDir, ".eslintrc.cjs")) ||
+      (await fileExists(repoDir, ".eslintrc.yml")) ||
+      (await fileExists(repoDir, ".eslintrc.yaml")) ||
       (await fileExists(repoDir, "eslint.config.js")) ||
-      (await fileExists(repoDir, "eslint.config.mjs"))
+      (await fileExists(repoDir, "eslint.config.mjs")) ||
+      (await fileExists(repoDir, "eslint.config.cjs")) ||
+      (await fileExists(repoDir, "eslint.config.ts")) ||
+      (await fileExists(repoDir, "eslint.config.mts")) ||
+      (await fileExists(repoDir, "eslint.config.cts"))
     ) {
       lintCmd = "npx eslint .";
     }

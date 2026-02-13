@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, unlink } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import type {
   PrInfo,
@@ -10,12 +11,8 @@ import type {
 import { exec, logStep, logSuccess, logError, logWarn, truncate } from "./utils.js";
 
 // Path to the schema file (relative to package root, resolved at runtime)
-const SCHEMA_PATH = resolve(
-  import.meta.dirname ?? new URL(".", import.meta.url).pathname,
-  "..",
-  "schemas",
-  "review-output.json",
-);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SCHEMA_PATH = resolve(__dirname, "..", "schemas", "review-output.json");
 
 /**
  * Build the review prompt incorporating PR context and step results.
@@ -183,6 +180,9 @@ export async function runCodexReview(
   } catch {
     logWarn("Failed to parse Codex structured output, using raw text");
     return buildFallbackFromText(result.stdout, testResult, lintResult);
+  } finally {
+    // Clean up temp output file
+    await unlink(outputPath).catch(() => {});
   }
 }
 

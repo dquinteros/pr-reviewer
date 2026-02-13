@@ -30,22 +30,30 @@ codex logout && codex login
 
 ## Installation
 
+### Quick start with npx (no install needed)
+
 ```bash
-# Clone this repo (or download it)
-git clone https://github.com/your-org/pr-reviewer.git
-cd pr-reviewer
-
-# Install dependencies
-npm install
-
-# Build
-npm run build
-
-# Link globally (optional, lets you run `pr-reviewer` from anywhere)
-npm link
+npx pr-reviewer https://github.com/owner/repo/pull/123
 ```
 
-Or run directly without building (development mode):
+### Install globally from npm
+
+```bash
+npm i -g pr-reviewer
+pr-reviewer https://github.com/owner/repo/pull/123
+```
+
+### Install from source
+
+```bash
+git clone https://github.com/dquinteros/pr-reviewer.git
+cd pr-reviewer
+npm install
+npm run build
+npm link   # makes `pr-reviewer` available globally
+```
+
+Or run in development mode without building:
 
 ```bash
 npx tsx src/cli.ts <PR_URL>
@@ -239,6 +247,49 @@ reviewer/
     types.ts                # Shared TypeScript interfaces
     utils.ts                # Exec wrapper, logger, temp dir, truncation
 ```
+
+## Publishing to npm
+
+The project includes GitHub Actions workflows for CI and publishing.
+
+### Setup
+
+1. Create an npm access token at [npmjs.com/settings/tokens](https://www.npmjs.com/settings/tokens) (use **Automation** type).
+2. Add the token as a repository secret named `NPM_TOKEN` in your GitHub repo settings (Settings > Secrets and variables > Actions).
+
+### Release process
+
+1. Update the version in `package.json`:
+
+```bash
+npm version patch   # 1.0.0 -> 1.0.1
+# or
+npm version minor   # 1.0.0 -> 1.1.0
+# or
+npm version major   # 1.0.0 -> 2.0.0
+```
+
+2. Push the tag to trigger the publish workflow:
+
+```bash
+git push origin main --tags
+```
+
+The workflow will automatically build, verify, and publish to npm with provenance.
+
+### Manual publish
+
+You can also trigger a publish (or dry run) manually from the **Actions** tab in GitHub:
+
+- Go to Actions > "Publish to npm" > Run workflow
+- Check "Dry run" to preview what would be published without actually publishing
+
+### Workflows
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| **CI** (`.github/workflows/ci.yml`) | Push to `main`, PRs | Builds and verifies on Node 18, 20, 22 |
+| **Publish** (`.github/workflows/publish.yml`) | Version tags (`v*`), manual | Builds, verifies, publishes to npm |
 
 ## License
 

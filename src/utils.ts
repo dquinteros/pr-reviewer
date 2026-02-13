@@ -93,6 +93,68 @@ export async function cleanupDir(dir: string): Promise<void> {
 /**
  * Truncate long output to avoid bloating prompts or comments.
  */
+// ── Diff parsing ──────────────────────────────────────────────────────
+
+/**
+ * Parse a unified diff to extract valid line numbers (in the new file)
+ * for each changed file. These are lines within diff hunks where GitHub
+ * allows inline review comments.
+ */
+export function parseDiffValidLines(diff: string): Map<string, Set<number>> {
+  const result = new Map<string, Set<number>>();
+  let currentFile: string | null = null;
+  let newLine = 0;
+  let inHunk = false;
+
+  for (const line of diff.split("\n")) {
+    // New file in diff: diff --git a/path b/path
+    const fileMatch = line.match(/^diff --git a\/.+ b\/(.+)$/);
+    if (fileMatch) {
+      currentFile = fileMatch[1];
+      if (!result.has(currentFile)) {
+        result.set(currentFile, new Set());
+      }
+      inHunk = false;
+      continue;
+    }
+
+    // Hunk header: @@ -old,count +new,count @@
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (hunkMatch && currentFile) {
+      newLine = parseInt(hunkMatch[1], 10);
+      inHunk = true;
+      continue;
+    }
+
+    if (!inHunk || !currentFile) continue;
+
+    const fileLines = result.get(currentFile)!;
+
+    if (line.startsWith("+")) {
+      fileLines.add(newLine);
+      newLine++;
+    } else if (line.startsWith("-")) {
+      // Deleted line: no new-file line number, don't advance counter
+    } else if (line.startsWith(" ")) {
+      // Context line: valid for comments
+      fileLines.add(newLine);
+      newLine++;
+    } else if (line.startsWith("\\")) {
+      // "\ No newline at end of file" — skip
+    } else {
+      // Outside hunk content (e.g., between hunks or diff headers)
+      inHunk = false;
+    }
+  }
+
+  return result;
+}
+
+// ── Truncation helper ────────────────────────────────────────────────
+
+/**
+ * Truncate long output to avoid bloating prompts or comments.
+ */
 export function truncate(text: string, maxLen = 5000): string {
   if (text.length <= maxLen) return text;
   const half = Math.floor((maxLen - 40) / 2);

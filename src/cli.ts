@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import ora from "ora";
 import chalk from "chalk";
@@ -25,6 +28,13 @@ import {
   cleanupDir,
 } from "./utils.js";
 
+// ── Resolve package metadata ─────────────────────────────────────────
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(
+  readFileSync(resolve(__dirname, "..", "package.json"), "utf-8"),
+) as { version: string };
+
 // ── CLI definition ───────────────────────────────────────────────────
 
 const program = new Command();
@@ -36,7 +46,7 @@ program
     "Clones the repo, runs tests and linting, performs AI code review, " +
     "and posts inline suggestions plus a summary comment to the PR.",
   )
-  .version("1.0.0")
+  .version(pkg.version)
   .argument("<pr-url>", "GitHub pull request URL (e.g. https://github.com/owner/repo/pull/123)")
   .option("--keep", "Keep the cloned repo directory after review", false)
   .option("--skip-tests", "Skip running the test suite", false)
@@ -164,7 +174,7 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
 
     // ── Step 9: Build and post review ────────────────────────────
     logStep("Building review payload...");
-    const payload = buildReviewPayload(review, meta, testResult, lintResult);
+    const payload = buildReviewPayload(review, meta, diff, testResult, lintResult);
 
     logInfo(
       `Review: ${payload.event} with ${payload.comments.length} inline comments`,
@@ -198,7 +208,7 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
       logInfo(`Keeping cloned repo at: ${repoDir}`);
     } else {
       // Clean up the parent temp directory (repoDir is <tempDir>/<repo>)
-      const parentDir = repoDir.replace(/\/[^/]+$/, "");
+      const parentDir = dirname(repoDir);
       logInfo("Cleaning up temporary files...");
       await cleanupDir(parentDir);
     }

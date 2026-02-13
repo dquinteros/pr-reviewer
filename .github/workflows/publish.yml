@@ -1,0 +1,68 @@
+name: Publish to npm
+
+on:
+  # Trigger on version tags (e.g. v1.0.0, v1.2.3-beta.1)
+  push:
+    tags:
+      - "v*"
+
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (skip actual publish)"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write  # Required for npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          echo "--- dist/ contents ---"
+          ls -la dist/
+          echo ""
+          echo "--- Checking bin entry point ---"
+          head -1 dist/cli.js
+          echo ""
+          echo "--- Package contents (dry-run pack) ---"
+          npm pack --dry-run
+
+      - name: Verify CLI runs
+        run: node dist/cli.js --version
+
+      - name: Publish to npm
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish dry run
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "DRY RUN -- would publish:"
+          npm pack --dry-run
+          echo ""
+          echo "Version: $(node -p 'require("./package.json").version')"
