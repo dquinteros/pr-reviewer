@@ -40,7 +40,7 @@ const pkg = JSON.parse(
 const program = new Command();
 
 program
-  .name("pr-reviewer")
+  .name("ai-pr-reviewer")
   .description(
     "Review GitHub pull requests using Codex CLI and GitHub CLI. " +
     "Clones the repo, runs tests and linting, performs AI code review, " +

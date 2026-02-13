@@ -1,10 +1,10 @@
-# pr-reviewer
+# ai-pr-reviewer
 
 A CLI tool that reviews GitHub pull requests using **OpenAI Codex CLI** and **GitHub CLI**. It clones the repository, runs tests and linting, performs AI-powered code review, and posts inline suggestions plus a summary comment directly to the PR.
 
 ## Prerequisites
 
-Before using `pr-reviewer`, make sure you have the following installed and authenticated:
+Before using `ai-pr-reviewer`, make sure you have the following installed and authenticated:
 
 | Tool | Install | Auth |
 |------|---------|------|
@@ -33,24 +33,24 @@ codex logout && codex login
 ### Quick start with npx (no install needed)
 
 ```bash
-npx pr-reviewer https://github.com/owner/repo/pull/123
+npx ai-pr-reviewer https://github.com/owner/repo/pull/123
 ```
 
 ### Install globally from npm
 
 ```bash
-npm i -g pr-reviewer
-pr-reviewer https://github.com/owner/repo/pull/123
+npm i -g ai-pr-reviewer
+ai-pr-reviewer https://github.com/owner/repo/pull/123
 ```
 
 ### Install from source
 
 ```bash
-git clone https://github.com/dquinteros/pr-reviewer.git
-cd pr-reviewer
+git clone https://github.com/dquinteros/reviewer.git
+cd reviewer
 npm install
 npm run build
-npm link   # makes `pr-reviewer` available globally
+npm link   # makes `ai-pr-reviewer` available globally
 ```
 
 Or run in development mode without building:
@@ -63,25 +63,25 @@ npx tsx src/cli.ts <PR_URL>
 
 ```bash
 # Basic usage
-pr-reviewer https://github.com/owner/repo/pull/123
+ai-pr-reviewer https://github.com/owner/repo/pull/123
 
 # Keep the cloned repo for debugging
-pr-reviewer https://github.com/owner/repo/pull/123 --keep
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --keep
 
 # Skip tests
-pr-reviewer https://github.com/owner/repo/pull/123 --skip-tests
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-tests
 
 # Skip linting
-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint
 
 # Skip AI review (only run tests and lint, post those results)
-pr-reviewer https://github.com/owner/repo/pull/123 --skip-review
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-review
 
 # Use a specific Codex model
-pr-reviewer https://github.com/owner/repo/pull/123 --model gpt-5.3-codex
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --model gpt-5.3-codex
 
 # Combine flags
-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model gpt-5.3-codex
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model gpt-5.3-codex
 ```
 
 ### CLI Flags Reference
@@ -201,7 +201,7 @@ If a step times out, the output shows `[TIMEOUT]` and the pipeline continues wit
 The tool sets `CI=true` and uses `--forceExit` for Jest, but some test suites may still hang if they start servers or have unusual configurations. Use `--skip-tests` to bypass:
 
 ```bash
-pr-reviewer https://github.com/owner/repo/pull/123 --skip-tests
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-tests
 ```
 
 ### Codex authentication errors
@@ -225,8 +225,8 @@ gh auth login --scopes repo
 PRs with very large diffs (>30K chars) are automatically truncated in the review prompt. For best results on large PRs, consider reviewing specific areas by using Codex CLI directly on the cloned repo with `--keep`:
 
 ```bash
-pr-reviewer https://github.com/owner/repo/pull/123 --keep --skip-review
-# Then manually: cd /tmp/pr-reviewer-XXXXXX/repo && codex
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --keep --skip-review
+# Then manually: cd /tmp/ai-pr-reviewer-XXXXXX/repo && codex
 ```
 
 ## Project Structure

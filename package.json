@@ -1,11 +1,11 @@
 {
-  "name": "pr-reviewer",
-  "version": "1.0.0",
+  "name": "ai-pr-reviewer",
+  "version": "0.1.0",
   "description": "CLI tool that reviews GitHub pull requests using Codex CLI and GitHub CLI",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
-    "pr-reviewer": "dist/cli.js"
+    "ai-pr-reviewer": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -37,7 +37,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/dquinteros/pr-reviewer.git"
+    "url": "https://github.com/dquinteros/reviewer.git"
   },
   "license": "MIT",
   "dependencies": {

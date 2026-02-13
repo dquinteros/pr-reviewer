@@ -77,7 +77,7 @@ export async function exec(
 /**
  * Create a temporary directory for cloning a repository.
  */
-export async function createTempDir(prefix = "pr-reviewer-"): Promise<string> {
+export async function createTempDir(prefix = "ai-pr-reviewer-"): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix));
 }
 
