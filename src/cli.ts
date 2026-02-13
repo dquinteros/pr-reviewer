@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import ora from "ora";
 import chalk from "chalk";
-import type { CliOptions, StepResult } from "./types.js";
+import type { CliOptions, StepResult, ArchReviewOutput } from "./types.js";
 import {
   parsePrUrl,
   fetchPrMetadata,
@@ -19,6 +19,7 @@ import {
 import { detectProject } from "./detect.js";
 import { runInstall, runTests, runLint } from "./runner.js";
 import { runCodexReview } from "./review.js";
+import { runArchReview } from "./arch-review.js";
 import { buildReviewPayload } from "./reporter.js";
 import {
   logInfo,
@@ -52,6 +53,7 @@ program
   .option("--skip-tests", "Skip running the test suite", false)
   .option("--skip-lint", "Skip running the linter", false)
   .option("--skip-review", "Skip AI code review (only run tests/lint)", false)
+  .option("--skip-arch", "Skip architecture conformance review", false)
   .option("-m, --model <model>", "Codex model to use (e.g. gpt-5.3-codex)")
   .action(async (prUrl: string, opts: CliOptions) => {
     await run(prUrl, opts);
@@ -172,9 +174,23 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
       };
     }
 
-    // ── Step 9: Build and post review ────────────────────────────
+    // ── Step 9: Architecture Conformance Review ───────────────────
+    let archReview: ArchReviewOutput | null = null;
+    if (!opts.skipArch && !opts.skipReview) {
+      archReview = await runArchReview(
+        repoDir,
+        pr,
+        meta,
+        diff,
+        opts.model,
+      );
+    } else if (opts.skipArch) {
+      logInfo("Skipping architecture review (--skip-arch)");
+    }
+
+    // ── Step 10: Build and post review ───────────────────────────
     logStep("Building review payload...");
-    const payload = buildReviewPayload(review, meta, diff, testResult, lintResult);
+    const payload = buildReviewPayload(review, meta, diff, testResult, lintResult, archReview);
 
     logInfo(
       `Review: ${payload.event} with ${payload.comments.length} inline comments`,

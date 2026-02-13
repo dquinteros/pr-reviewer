@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "A concise overall summary of the architecture conformance review."
+    },
+    "conformance_score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Architecture conformance score from 0 (many violations) to 100 (fully conformant)."
+    },
+    "violations": {
+      "type": "array",
+      "description": "List of architecture conformance violations found in the PR changes.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Relative file path from the repository root."
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line number where the violation occurs."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["layer_violation", "naming_convention", "design_pattern", "circular_dependency"],
+            "description": "Category of the architecture violation."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "warning", "suggestion"],
+            "description": "Severity level of the violation."
+          },
+          "rule": {
+            "type": "string",
+            "description": "The architecture rule that was violated."
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed explanation of why this is a violation."
+          },
+          "suggestion": {
+            "type": "string",
+            "description": "Suggested fix or refactoring to resolve the violation. Use empty string if no concrete fix."
+          }
+        },
+        "required": ["file", "line", "category", "severity", "rule", "description", "suggestion"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["summary", "conformance_score", "violations"],
+  "additionalProperties": false
+}

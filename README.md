@@ -1,6 +1,6 @@
 # ai-pr-reviewer
 
-A CLI tool that reviews GitHub pull requests using **OpenAI Codex CLI** and **GitHub CLI**. It clones the repository, runs tests and linting, performs AI-powered code review, and posts inline suggestions plus a summary comment directly to the PR.
+A CLI tool that reviews GitHub pull requests using **OpenAI Codex CLI** and **GitHub CLI**. It clones the repository, runs tests and linting, performs AI-powered code review, checks architecture conformance, and posts inline suggestions plus a summary comment directly to the PR.
 
 ## Prerequisites
 
@@ -77,6 +77,9 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint
 # Skip AI review (only run tests and lint, post those results)
 ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-review
 
+# Skip architecture conformance review
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-arch
+
 # Use a specific Codex model
 ai-pr-reviewer https://github.com/owner/repo/pull/123 --model gpt-5.3-codex
 
@@ -92,6 +95,7 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model
 | `--skip-tests` | Skip running the test suite | `false` |
 | `--skip-lint` | Skip running the linter | `false` |
 | `--skip-review` | Skip AI code review (only run tests/lint) | `false` |
+| `--skip-arch` | Skip architecture conformance review | `false` |
 | `-m, --model <model>` | Codex model to use | Codex default |
 | `-V, --version` | Show version number | -- |
 | `-h, --help` | Show help | -- |
@@ -108,8 +112,9 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model
 8. **Runs the test suite** -- executes the detected test command with `CI=true` and captures results. For Jest projects, uses `--forceExit --watchAll=false` to prevent hanging.
 9. **Runs the linter** -- executes the detected lint command and captures results.
 10. **Performs AI code review** -- sends the PR diff, test results, and lint results to Codex CLI (`codex exec`) for structured analysis using a JSON schema.
-11. **Posts results to GitHub** -- creates a PR review with inline comments on specific lines (using GitHub suggestion syntax) plus an overall summary comment.
-12. **Cleans up** -- removes the temporary clone (unless `--keep` is used).
+11. **Architecture conformance review** -- runs a separate AI analysis checking the PR changes against the project's architecture rules (from `.arch-rules.yml` if present, or AI-inferred from the codebase structure).
+12. **Posts results to GitHub** -- creates a PR review with inline comments on specific lines (using GitHub suggestion syntax) plus an overall summary comment including architecture conformance score.
+13. **Cleans up** -- removes the temporary clone (unless `--keep` is used).
 
 ## Supported Project Types
 
@@ -169,6 +174,69 @@ The structured output schema enforces:
 - An **overall summary comment** is posted with a severity table, test results, and lint results.
 - The GitHub review event is set to `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` based on the AI verdict.
 
+## Architecture Conformance Review
+
+After the code review, a separate AI step checks the PR changes for architecture violations. It supports two modes:
+
+### Explicit rules (`.arch-rules.yml`)
+
+If the repository contains a `.arch-rules.yml` (or `.arch-rules.yaml`) at the root, the tool loads it and evaluates changes against those rules. Example config:
+
+```yaml
+layers:
+  - name: presentation
+    paths: ["src/components/**", "src/pages/**"]
+    allowed_imports: ["domain", "application"]
+  - name: application
+    paths: ["src/services/**", "src/hooks/**"]
+    allowed_imports: ["domain"]
+  - name: domain
+    paths: ["src/models/**", "src/types/**"]
+    allowed_imports: []
+  - name: infrastructure
+    paths: ["src/api/**", "src/db/**"]
+    allowed_imports: ["domain"]
+
+naming_conventions:
+  - pattern: "src/components/**/*.tsx"
+    rule: "PascalCase filenames"
+  - pattern: "src/services/**/*.ts"
+    rule: "camelCase filenames, must export a class ending in 'Service'"
+
+design_patterns:
+  - "Services should not import directly from components"
+  - "Repository pattern for data access"
+```
+
+### AI-inferred rules
+
+When no config file is present, the AI infers the project's architecture from its directory structure, naming conventions, and import graph, then checks the PR changes for conformance.
+
+### What it checks
+
+| Category | Description |
+|----------|-------------|
+| **Layer violations** | Imports that cross layer boundaries incorrectly (e.g., domain importing from presentation) |
+| **Naming conventions** | Files, classes, or functions that don't follow established naming patterns |
+| **Design patterns** | Code that breaks established patterns (e.g., business logic in controllers) |
+| **Circular dependencies** | New imports that create or contribute to circular dependency chains |
+
+### Architecture review output
+
+The structured output includes:
+- **summary** -- overall architecture conformance assessment
+- **conformance_score** -- 0 to 100 (100 = fully conformant)
+- **violations[]** -- specific violations, each with:
+  - `file` -- relative file path
+  - `line` -- line number
+  - `category` -- `layer_violation`, `naming_convention`, `design_pattern`, or `circular_dependency`
+  - `severity` -- `critical`, `warning`, or `suggestion`
+  - `rule` -- the architecture rule that was violated
+  - `description` -- detailed explanation
+  - `suggestion` -- concrete fix
+
+Architecture violations are posted as inline PR comments (just like code review findings) and appear in a dedicated "Architecture Conformance" section of the summary comment with a score and violations table.
+
 ## Timeouts
 
 | Step | Timeout | Notes |
@@ -178,6 +246,7 @@ The structured output schema enforces:
 | Tests | 3 min | Shorter to avoid hanging test suites |
 | Lint | 5 min | Default exec timeout |
 | AI Review | 5 min | Codex exec timeout |
+| Arch Review | 5 min | Codex exec timeout |
 
 If a step times out, the output shows `[TIMEOUT]` and the pipeline continues with the remaining steps.
 
@@ -236,13 +305,15 @@ reviewer/
   package.json              # npm package with bin entry
   tsconfig.json             # TypeScript config (ES2022, Node16)
   schemas/
-    review-output.json      # JSON Schema for Codex structured output
+    review-output.json      # JSON Schema for Codex code review output
+    arch-review-output.json # JSON Schema for architecture review output
   src/
     cli.ts                  # Entry point: commander CLI, orchestration
     github.ts               # gh CLI wrapper: PR metadata, clone, post review
     detect.ts               # Auto-detect project type and commands
     runner.ts               # Run install/test/lint, capture output
     review.ts               # Build prompt, call codex exec, parse results
+    arch-review.ts          # Architecture conformance review (load rules, prompt, call codex)
     reporter.ts             # Build GitHub review payload with inline suggestions
     types.ts                # Shared TypeScript interfaces
     utils.ts                # Exec wrapper, logger, temp dir, truncation

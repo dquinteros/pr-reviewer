@@ -91,5 +91,53 @@ export interface CliOptions {
   skipTests: boolean;
   skipLint: boolean;
   skipReview: boolean;
+  skipArch: boolean;
   model?: string;
+}
+
+// ── Architecture Conformance Review types ─────────────────────────────
+
+/** A layer definition from .arch-rules.yml */
+export interface ArchLayer {
+  name: string;
+  paths: string[];
+  allowed_imports: string[];
+}
+
+/** A naming convention rule from .arch-rules.yml */
+export interface ArchNamingConvention {
+  pattern: string;
+  rule: string;
+}
+
+/** Parsed .arch-rules.yml configuration */
+export interface ArchRules {
+  layers?: ArchLayer[];
+  naming_conventions?: ArchNamingConvention[];
+  design_patterns?: string[];
+}
+
+/** Category of an architecture violation */
+export type ArchViolationCategory =
+  | "layer_violation"
+  | "naming_convention"
+  | "design_pattern"
+  | "circular_dependency";
+
+/** A single architecture conformance violation */
+export interface ArchViolation {
+  file: string;
+  line: number;
+  category: ArchViolationCategory;
+  severity: "critical" | "warning" | "suggestion";
+  rule: string;
+  description: string;
+  suggestion: string;
+}
+
+/** Structured output from the architecture conformance review */
+export interface ArchReviewOutput {
+  summary: string;
+  conformance_score: number;
+  violations: ArchViolation[];
 }
