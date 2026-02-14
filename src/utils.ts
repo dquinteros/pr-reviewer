@@ -166,3 +166,86 @@ export function truncate(text: string, maxLen = 5000): string {
     text.slice(-half)
   );
 }
+
+// ── Diff splitting ───────────────────────────────────────────────────
+
+/** A single file's portion of a unified diff. */
+export interface FileDiff {
+  file: string;
+  content: string; // includes the "diff --git …" header
+}
+
+/**
+ * Split a unified diff string into per-file entries.
+ * Each entry contains the full diff text for a single file (headers + hunks).
+ */
+export function splitDiffByFile(diff: string): FileDiff[] {
+  const files: FileDiff[] = [];
+  const lines = diff.split("\n");
+
+  let currentFile: string | null = null;
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    const fileMatch = line.match(/^diff --git a\/.+ b\/(.+)$/);
+    if (fileMatch) {
+      // Flush the previous file
+      if (currentFile && currentLines.length > 0) {
+        files.push({ file: currentFile, content: currentLines.join("\n") });
+      }
+      currentFile = fileMatch[1];
+      currentLines = [line];
+    } else {
+      currentLines.push(line);
+    }
+  }
+
+  // Flush last file
+  if (currentFile && currentLines.length > 0) {
+    files.push({ file: currentFile, content: currentLines.join("\n") });
+  }
+
+  return files;
+}
+
+/**
+ * Group per-file diffs into batches where each batch stays under
+ * `maxCharsPerBatch` characters.  Files that are individually larger
+ * than the budget are placed in their own solo batch.
+ */
+export function batchDiffChunks(
+  fileDiffs: FileDiff[],
+  maxCharsPerBatch = 30_000,
+): string[] {
+  const batches: string[] = [];
+  let currentBatch: string[] = [];
+  let currentSize = 0;
+
+  for (const fd of fileDiffs) {
+    const entrySize = fd.content.length;
+
+    // If adding this file would exceed the budget, flush current batch first
+    if (currentBatch.length > 0 && currentSize + entrySize > maxCharsPerBatch) {
+      batches.push(currentBatch.join("\n"));
+      currentBatch = [];
+      currentSize = 0;
+    }
+
+    currentBatch.push(fd.content);
+    currentSize += entrySize;
+
+    // If a single file already exceeds the budget, flush it immediately as a solo batch
+    if (entrySize > maxCharsPerBatch) {
+      batches.push(currentBatch.join("\n"));
+      currentBatch = [];
+      currentSize = 0;
+    }
+  }
+
+  // Flush remaining
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch.join("\n"));
+  }
+
+  return batches;
+}

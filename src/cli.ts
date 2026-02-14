@@ -22,6 +22,11 @@ import { runCodexReview } from "./review.js";
 import { runArchReview } from "./arch-review.js";
 import { buildReviewPayload } from "./reporter.js";
 import {
+  summarizeDescription,
+  summarizeTestResults,
+  summarizeLintResults,
+} from "./summarize.js";
+import {
   logInfo,
   logSuccess,
   logError,
@@ -123,6 +128,15 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
   }
 
   try {
+    // ── Step 3.5: Summarise PR description ──────────────────────
+    if (!opts.skipReview && meta.body) {
+      meta.bodySummary = await summarizeDescription(
+        meta.body,
+        repoDir,
+        opts.model,
+      );
+    }
+
     // ── Step 4: Detect project type ──────────────────────────────
     logStep("Detecting project type...");
     const config = await detectProject(repoDir);
@@ -151,6 +165,24 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
       lintResult = await runLint(config, repoDir);
     } else {
       logInfo("Skipping linter (--skip-lint)");
+    }
+
+    // ── Step 7.5: Summarise test & lint results ─────────────────
+    if (!opts.skipReview) {
+      if (testResult && testResult.output && testResult.output !== "No test command detected; skipped.") {
+        testResult.summarizedOutput = await summarizeTestResults(
+          testResult.output,
+          repoDir,
+          opts.model,
+        );
+      }
+      if (lintResult && lintResult.output && lintResult.output !== "No lint command detected; skipped.") {
+        lintResult.summarizedOutput = await summarizeLintResults(
+          lintResult.output,
+          repoDir,
+          opts.model,
+        );
+      }
     }
 
     // ── Step 8: AI Code Review ───────────────────────────────────

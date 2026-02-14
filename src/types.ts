@@ -10,6 +10,8 @@ export interface PrInfo {
 export interface PrMetadata {
   title: string;
   body: string;
+  /** AI-generated summary of the PR description (set after pre-processing). */
+  bodySummary?: string;
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
@@ -51,6 +53,8 @@ export interface StepResult {
   step: "install" | "test" | "lint";
   success: boolean;
   output: string;
+  /** AI-generated summary of the raw output (set after pre-processing). */
+  summarizedOutput?: string;
   duration: number;
 }
 

@@ -7,32 +7,70 @@ import type {
   PrMetadata,
   StepResult,
   ReviewOutput,
+  ReviewFinding,
 } from "./types.js";
-import { exec, logStep, logSuccess, logError, logWarn, truncate } from "./utils.js";
+import {
+  exec,
+  logStep,
+  logSuccess,
+  logError,
+  logWarn,
+  logInfo,
+  truncate,
+  splitDiffByFile,
+  batchDiffChunks,
+} from "./utils.js";
 
 // Path to the schema file (relative to package root, resolved at runtime)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = resolve(__dirname, "..", "schemas", "review-output.json");
 
+// ── Verdict severity for merging ─────────────────────────────────────
+
+const VERDICT_SEVERITY: Record<ReviewOutput["verdict"], number> = {
+  approve: 0,
+  comment: 1,
+  request_changes: 2,
+};
+
+// ── Prompt builder ───────────────────────────────────────────────────
+
 /**
  * Build the review prompt incorporating PR context and step results.
+ *
+ * Uses `meta.bodySummary` (AI summary) when available, falling back to
+ * truncated raw body.  Uses `stepResult.summarizedOutput` for test/lint
+ * when available.  Receives the diff chunk directly (no internal truncation).
  */
 function buildPrompt(
   pr: PrInfo,
   meta: PrMetadata,
-  diff: string,
+  diffChunk: string,
   testResult: StepResult | null,
   lintResult: StepResult | null,
+  batchInfo?: { current: number; total: number },
 ): string {
   const parts: string[] = [];
 
   parts.push(
     `You are reviewing Pull Request #${pr.number} in ${pr.owner}/${pr.repo}.`,
   );
-  parts.push(`Title: ${meta.title}`);
-  if (meta.body) {
-    parts.push(`Description: ${truncate(meta.body, 2000)}`);
+
+  if (batchInfo && batchInfo.total > 1) {
+    parts.push(
+      `(Reviewing diff batch ${batchInfo.current} of ${batchInfo.total} — ` +
+      `focus only on the files in THIS batch.)`,
+    );
   }
+
+  parts.push(`Title: ${meta.title}`);
+
+  // Prefer AI-summarised description, fall back to truncated raw body
+  const description = meta.bodySummary ?? (meta.body ? truncate(meta.body, 2000) : "");
+  if (description) {
+    parts.push(`Description: ${description}`);
+  }
+
   parts.push(
     `Base branch: ${meta.baseRefName}, Head branch: ${meta.headRefName}`,
   );
@@ -47,27 +85,29 @@ function buildPrompt(
     parts.push("");
   }
 
-  // Include the diff
+  // Include the diff chunk (no truncation — batching already handles size)
   parts.push("PR Diff:");
   parts.push("```diff");
-  parts.push(truncate(diff, 30000));
+  parts.push(diffChunk);
   parts.push("```");
   parts.push("");
 
-  // Include test results if available
+  // Include test results if available (prefer summary)
   if (testResult && testResult.output !== "No test command detected; skipped.") {
+    const testText = testResult.summarizedOutput ?? truncate(testResult.output, 3000);
     parts.push(`Test results (${testResult.success ? "PASSED" : "FAILED"}):`);
     parts.push("```");
-    parts.push(truncate(testResult.output, 3000));
+    parts.push(testText);
     parts.push("```");
     parts.push("");
   }
 
-  // Include lint results if available
+  // Include lint results if available (prefer summary)
   if (lintResult && lintResult.output !== "No lint command detected; skipped.") {
+    const lintText = lintResult.summarizedOutput ?? truncate(lintResult.output, 3000);
     parts.push(`Lint results (${lintResult.success ? "PASSED" : "FAILED"}):`);
     parts.push("```");
-    parts.push(truncate(lintResult.output, 3000));
+    parts.push(lintText);
     parts.push("```");
     parts.push("");
   }
@@ -96,26 +136,19 @@ function buildPrompt(
   return parts.join("\n");
 }
 
+// ── Single-batch review execution ────────────────────────────────────
+
 /**
- * Run Codex AI review on the PR.
+ * Execute a single Codex review call for one diff batch.
  */
-export async function runCodexReview(
+async function reviewBatch(
   repoDir: string,
+  prompt: string,
   pr: PrInfo,
-  meta: PrMetadata,
-  diff: string,
-  testResult: StepResult | null,
-  lintResult: StepResult | null,
   model?: string,
-): Promise<ReviewOutput> {
-  logStep("Running AI code review with Codex...");
-
-  const prompt = buildPrompt(pr, meta, diff, testResult, lintResult);
-
-  // Write the result to a temp file
+): Promise<ReviewOutput | null> {
   const outputPath = join(tmpdir(), `pr-review-${pr.number}-${Date.now()}.json`);
 
-  // Build codex exec arguments
   const args: string[] = [
     "exec",
     "--yolo",
@@ -134,57 +167,151 @@ export async function runCodexReview(
   args.push(prompt);
 
   const result = await exec("codex", args, {
-    timeout: 5 * 60 * 1000, // 5 min timeout for review
+    timeout: 5 * 60 * 1000,
   });
 
-  // Combine stdout+stderr for error detection (codex logs to stderr)
   const allOutput = result.stdout + "\n" + result.stderr;
 
-  // Check for auth errors specifically
   if (
     allOutput.includes("refresh_token_reused") ||
     allOutput.includes("Failed to refresh token") ||
     allOutput.includes("401 Unauthorized")
   ) {
     logError("Codex authentication expired. Run `codex logout && codex login` to re-authenticate.");
-    return buildFallbackReview(testResult, lintResult);
+    return null;
   }
 
-  // Check for schema errors
   if (allOutput.includes("invalid_json_schema") || allOutput.includes("Invalid schema")) {
     logError("Codex rejected the output schema. Check schemas/review-output.json");
     logError(result.stderr);
-    return buildFallbackReview(testResult, lintResult);
+    return null;
   }
 
   if (!result.success) {
     logError(`Codex review failed: ${result.stderr}`);
-    return buildFallbackReview(testResult, lintResult);
+    return null;
   }
 
-  // Read the structured output
   try {
     const raw = await readFile(outputPath, "utf-8");
     const parsed = JSON.parse(raw) as ReviewOutput;
 
-    // Validate basic structure
     if (!parsed.summary || !Array.isArray(parsed.findings) || !parsed.verdict) {
       logWarn("Codex output missing expected fields, using raw text");
-      return buildFallbackFromText(result.stdout, testResult, lintResult);
+      return {
+        summary: truncate(result.stdout, 4000) || "Review produced no structured output.",
+        findings: [],
+        verdict: "comment",
+      };
     }
 
-    logSuccess(
-      `AI review complete: ${parsed.findings.length} findings, verdict: ${parsed.verdict}`,
-    );
     return parsed;
   } catch {
     logWarn("Failed to parse Codex structured output, using raw text");
-    return buildFallbackFromText(result.stdout, testResult, lintResult);
+    return {
+      summary: truncate(result.stdout, 4000) || "Review produced no structured output.",
+      findings: [],
+      verdict: "comment",
+    };
   } finally {
-    // Clean up temp output file
     await unlink(outputPath).catch(() => {});
   }
 }
+
+// ── Merge batch results ──────────────────────────────────────────────
+
+/**
+ * Merge multiple per-batch ReviewOutputs into a single result.
+ * Concatenates findings, joins summaries, and picks the most severe verdict.
+ */
+function mergeReviews(results: ReviewOutput[]): ReviewOutput {
+  const allFindings: ReviewFinding[] = [];
+  const summaries: string[] = [];
+  let worstVerdict: ReviewOutput["verdict"] = "approve";
+
+  for (const r of results) {
+    allFindings.push(...r.findings);
+    if (r.summary) summaries.push(r.summary);
+    if (VERDICT_SEVERITY[r.verdict] > VERDICT_SEVERITY[worstVerdict]) {
+      worstVerdict = r.verdict;
+    }
+  }
+
+  return {
+    summary: summaries.join("\n\n"),
+    findings: allFindings,
+    verdict: worstVerdict,
+  };
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+/**
+ * Run Codex AI review on the PR.
+ *
+ * If the diff is small enough it runs a single review call.  For large
+ * diffs it splits the diff into per-file batches and reviews each batch
+ * separately, then merges the results.
+ */
+export async function runCodexReview(
+  repoDir: string,
+  pr: PrInfo,
+  meta: PrMetadata,
+  diff: string,
+  testResult: StepResult | null,
+  lintResult: StepResult | null,
+  model?: string,
+): Promise<ReviewOutput> {
+  logStep("Running AI code review with Codex...");
+
+  // Split diff into per-file chunks, then batch to stay within budget
+  const fileDiffs = splitDiffByFile(diff);
+  const batches = batchDiffChunks(fileDiffs);
+
+  if (batches.length <= 1) {
+    // Single batch — fast path
+    const prompt = buildPrompt(pr, meta, diff, testResult, lintResult);
+    const result = await reviewBatch(repoDir, prompt, pr, model);
+    if (result) {
+      logSuccess(
+        `AI review complete: ${result.findings.length} findings, verdict: ${result.verdict}`,
+      );
+      return result;
+    }
+    return buildFallbackReview(testResult, lintResult);
+  }
+
+  // Multiple batches
+  logInfo(`Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches`);
+
+  const batchResults: ReviewOutput[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    logStep(`Reviewing batch ${i + 1}/${batches.length}...`);
+    const prompt = buildPrompt(
+      pr, meta, batches[i], testResult, lintResult,
+      { current: i + 1, total: batches.length },
+    );
+    const result = await reviewBatch(repoDir, prompt, pr, model);
+    if (result) {
+      batchResults.push(result);
+    }
+  }
+
+  if (batchResults.length === 0) {
+    logWarn("All review batches failed — using fallback");
+    return buildFallbackReview(testResult, lintResult);
+  }
+
+  const merged = mergeReviews(batchResults);
+  logSuccess(
+    `AI review complete (${batches.length} batches): ` +
+    `${merged.findings.length} findings, verdict: ${merged.verdict}`,
+  );
+  return merged;
+}
+
+// ── Fallback builders ────────────────────────────────────────────────
 
 /**
  * Build a fallback review when Codex fails entirely.
@@ -196,34 +323,12 @@ function buildFallbackReview(
   const parts: string[] = ["AI review could not be completed."];
 
   if (testResult && !testResult.success) {
-    parts.push(`\n**Tests failed:**\n\`\`\`\n${truncate(testResult.output, 2000)}\n\`\`\``);
+    const text = testResult.summarizedOutput ?? truncate(testResult.output, 2000);
+    parts.push(`\n**Tests failed:**\n\`\`\`\n${text}\n\`\`\``);
   }
   if (lintResult && !lintResult.success) {
-    parts.push(`\n**Lint issues:**\n\`\`\`\n${truncate(lintResult.output, 2000)}\n\`\`\``);
-  }
-
-  return {
-    summary: parts.join("\n"),
-    findings: [],
-    verdict: "comment",
-  };
-}
-
-/**
- * Build a review from raw Codex text output when structured parsing fails.
- */
-function buildFallbackFromText(
-  text: string,
-  testResult: StepResult | null,
-  lintResult: StepResult | null,
-): ReviewOutput {
-  const parts: string[] = [truncate(text, 4000)];
-
-  if (testResult && !testResult.success) {
-    parts.push(`\n**Tests failed:**\n\`\`\`\n${truncate(testResult.output, 2000)}\n\`\`\``);
-  }
-  if (lintResult && !lintResult.success) {
-    parts.push(`\n**Lint issues:**\n\`\`\`\n${truncate(lintResult.output, 2000)}\n\`\`\``);
+    const text = lintResult.summarizedOutput ?? truncate(lintResult.output, 2000);
+    parts.push(`\n**Lint issues:**\n\`\`\`\n${text}\n\`\`\``);
   }
 
   return {

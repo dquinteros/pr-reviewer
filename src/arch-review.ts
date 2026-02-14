@@ -8,8 +8,19 @@ import type {
   PrMetadata,
   ArchRules,
   ArchReviewOutput,
+  ArchViolation,
 } from "./types.js";
-import { exec, logStep, logSuccess, logError, logWarn, truncate } from "./utils.js";
+import {
+  exec,
+  logStep,
+  logSuccess,
+  logError,
+  logWarn,
+  logInfo,
+  truncate,
+  splitDiffByFile,
+  batchDiffChunks,
+} from "./utils.js";
 
 // Path to the architecture review schema (relative to package root)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,14 +59,17 @@ export async function loadArchRules(repoDir: string): Promise<ArchRules | null> 
 
 /**
  * Build the Codex prompt for architecture conformance review.
- * If explicit rules are provided, embed them; otherwise instruct
- * the AI to infer the architecture from the codebase.
+ *
+ * Uses `meta.bodySummary` (AI summary) when available, falling back to
+ * truncated raw body.  Receives the diff chunk directly (no internal
+ * truncation — batching handles size).
  */
 function buildArchPrompt(
   pr: PrInfo,
   meta: PrMetadata,
-  diff: string,
+  diffChunk: string,
   rules: ArchRules | null,
+  batchInfo?: { current: number; total: number },
 ): string {
   const parts: string[] = [];
 
@@ -67,12 +81,21 @@ function buildArchPrompt(
     "Your job is to check whether the changes in this PR conform to the " +
     "project's architecture rules and conventions.",
   );
+
+  if (batchInfo && batchInfo.total > 1) {
+    parts.push(
+      `(Reviewing diff batch ${batchInfo.current} of ${batchInfo.total} — ` +
+      `focus only on the files in THIS batch.)`,
+    );
+  }
+
   parts.push("");
 
-  // PR context
+  // PR context — prefer AI-summarised description
   parts.push(`Title: ${meta.title}`);
-  if (meta.body) {
-    parts.push(`Description: ${truncate(meta.body, 2000)}`);
+  const description = meta.bodySummary ?? (meta.body ? truncate(meta.body, 2000) : "");
+  if (description) {
+    parts.push(`Description: ${description}`);
   }
   parts.push(
     `Base branch: ${meta.baseRefName}, Head branch: ${meta.headRefName}`,
@@ -88,10 +111,10 @@ function buildArchPrompt(
     parts.push("");
   }
 
-  // Diff
+  // Diff chunk (no truncation — batching already handles size)
   parts.push("PR Diff:");
   parts.push("```diff");
-  parts.push(truncate(diff, 30000));
+  parts.push(diffChunk);
   parts.push("```");
   parts.push("");
 
@@ -187,34 +210,19 @@ function buildArchPrompt(
   return parts.join("\n");
 }
 
-// ── Run architecture conformance review ──────────────────────────────
+// ── Single-batch arch review execution ───────────────────────────────
 
 /**
- * Run the architecture conformance review using Codex CLI.
+ * Execute a single Codex architecture review call for one diff batch.
  */
-export async function runArchReview(
+async function archReviewBatch(
   repoDir: string,
+  prompt: string,
   pr: PrInfo,
-  meta: PrMetadata,
-  diff: string,
   model?: string,
-): Promise<ArchReviewOutput> {
-  logStep("Running architecture conformance review with Codex...");
-
-  // Load architecture rules from repo (if present)
-  const rules = await loadArchRules(repoDir);
-  if (rules) {
-    logSuccess("Loaded architecture rules from .arch-rules.yml");
-  } else {
-    logWarn("No .arch-rules.yml found — AI will infer architecture from codebase");
-  }
-
-  const prompt = buildArchPrompt(pr, meta, diff, rules);
-
-  // Temp file for structured output
+): Promise<ArchReviewOutput | null> {
   const outputPath = join(tmpdir(), `pr-arch-review-${pr.number}-${Date.now()}.json`);
 
-  // Build codex exec arguments
   const args: string[] = [
     "exec",
     "--yolo",
@@ -233,61 +241,159 @@ export async function runArchReview(
   args.push(prompt);
 
   const result = await exec("codex", args, {
-    timeout: 5 * 60 * 1000, // 5 min timeout
+    timeout: 5 * 60 * 1000,
   });
 
-  // Combine stdout+stderr for error detection (codex logs to stderr)
   const allOutput = result.stdout + "\n" + result.stderr;
 
-  // Check for auth errors
   if (
     allOutput.includes("refresh_token_reused") ||
     allOutput.includes("Failed to refresh token") ||
     allOutput.includes("401 Unauthorized")
   ) {
     logError("Codex authentication expired. Run `codex logout && codex login` to re-authenticate.");
-    return buildFallbackArchReview();
+    return null;
   }
 
-  // Check for schema errors
   if (allOutput.includes("invalid_json_schema") || allOutput.includes("Invalid schema")) {
     logError("Codex rejected the output schema. Check schemas/arch-review-output.json");
     logError(result.stderr);
-    return buildFallbackArchReview();
+    return null;
   }
 
   if (!result.success) {
     logError(`Codex architecture review failed: ${result.stderr}`);
-    return buildFallbackArchReview();
+    return null;
   }
 
-  // Read the structured output
   try {
     const raw = await readFile(outputPath, "utf-8");
     const parsed = JSON.parse(raw) as ArchReviewOutput;
 
-    // Validate basic structure
     if (
       !parsed.summary ||
       typeof parsed.conformance_score !== "number" ||
       !Array.isArray(parsed.violations)
     ) {
       logWarn("Codex arch review output missing expected fields, using fallback");
-      return buildFallbackFromText(result.stdout);
+      return {
+        summary: truncate(result.stdout, 4000) || "Architecture review produced no output.",
+        conformance_score: -1,
+        violations: [],
+      };
     }
 
-    logSuccess(
-      `Architecture review complete: score ${parsed.conformance_score}/100, ` +
-      `${parsed.violations.length} violations`,
-    );
     return parsed;
   } catch {
     logWarn("Failed to parse Codex arch review output, using fallback");
-    return buildFallbackFromText(result.stdout);
+    return {
+      summary: truncate(result.stdout, 4000) || "Architecture review produced no output.",
+      conformance_score: -1,
+      violations: [],
+    };
   } finally {
-    // Clean up temp output file
     await unlink(outputPath).catch(() => {});
   }
+}
+
+// ── Merge batch results ──────────────────────────────────────────────
+
+/**
+ * Merge multiple per-batch ArchReviewOutputs into a single result.
+ * Concatenates violations, joins summaries, and takes the minimum
+ * conformance score (worst case).
+ */
+function mergeArchReviews(results: ArchReviewOutput[]): ArchReviewOutput {
+  const allViolations: ArchViolation[] = [];
+  const summaries: string[] = [];
+  let worstScore = 100;
+
+  for (const r of results) {
+    allViolations.push(...r.violations);
+    if (r.summary) summaries.push(r.summary);
+    if (r.conformance_score >= 0 && r.conformance_score < worstScore) {
+      worstScore = r.conformance_score;
+    }
+  }
+
+  return {
+    summary: summaries.join("\n\n"),
+    conformance_score: worstScore,
+    violations: allViolations,
+  };
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+/**
+ * Run the architecture conformance review using Codex CLI.
+ *
+ * For large diffs the review is split into per-file batches, each
+ * reviewed independently and then merged.
+ */
+export async function runArchReview(
+  repoDir: string,
+  pr: PrInfo,
+  meta: PrMetadata,
+  diff: string,
+  model?: string,
+): Promise<ArchReviewOutput> {
+  logStep("Running architecture conformance review with Codex...");
+
+  // Load architecture rules from repo (if present)
+  const rules = await loadArchRules(repoDir);
+  if (rules) {
+    logSuccess("Loaded architecture rules from .arch-rules.yml");
+  } else {
+    logWarn("No .arch-rules.yml found — AI will infer architecture from codebase");
+  }
+
+  // Split diff into per-file chunks, then batch to stay within budget
+  const fileDiffs = splitDiffByFile(diff);
+  const batches = batchDiffChunks(fileDiffs);
+
+  if (batches.length <= 1) {
+    // Single batch — fast path
+    const prompt = buildArchPrompt(pr, meta, diff, rules);
+    const result = await archReviewBatch(repoDir, prompt, pr, model);
+    if (result) {
+      logSuccess(
+        `Architecture review complete: score ${result.conformance_score}/100, ` +
+        `${result.violations.length} violations`,
+      );
+      return result;
+    }
+    return buildFallbackArchReview();
+  }
+
+  // Multiple batches
+  logInfo(`Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches`);
+
+  const batchResults: ArchReviewOutput[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    logStep(`Architecture review batch ${i + 1}/${batches.length}...`);
+    const prompt = buildArchPrompt(
+      pr, meta, batches[i], rules,
+      { current: i + 1, total: batches.length },
+    );
+    const result = await archReviewBatch(repoDir, prompt, pr, model);
+    if (result) {
+      batchResults.push(result);
+    }
+  }
+
+  if (batchResults.length === 0) {
+    logWarn("All architecture review batches failed — using fallback");
+    return buildFallbackArchReview();
+  }
+
+  const merged = mergeArchReviews(batchResults);
+  logSuccess(
+    `Architecture review complete (${batches.length} batches): ` +
+    `score ${merged.conformance_score}/100, ${merged.violations.length} violations`,
+  );
+  return merged;
 }
 
 // ── Fallback builders ────────────────────────────────────────────────
@@ -298,17 +404,6 @@ export async function runArchReview(
 function buildFallbackArchReview(): ArchReviewOutput {
   return {
     summary: "Architecture conformance review could not be completed.",
-    conformance_score: -1,
-    violations: [],
-  };
-}
-
-/**
- * Build an architecture review from raw text when structured parsing fails.
- */
-function buildFallbackFromText(text: string): ArchReviewOutput {
-  return {
-    summary: truncate(text, 4000) || "Architecture conformance review produced no output.",
     conformance_score: -1,
     violations: [],
   };
