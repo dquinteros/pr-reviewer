@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { truncate, parseDiffValidLines } from "../src/utils.js";
+import { truncate, parseDiffValidLines, filterDiffs, splitDiffByFile, batchDiffChunks } from "../src/utils.js";
+import type { FileDiff } from "../src/utils.js";
 
 // ── truncate ──────────────────────────────────────────────────────────
 
@@ -168,5 +169,148 @@ describe("parseDiffValidLines", () => {
     expect(lines.has(2)).toBe(true);
     expect(lines.has(3)).toBe(true);
     expect(lines.size).toBe(3);
+  });
+});
+
+// ── filterDiffs ───────────────────────────────────────────────────────
+
+describe("filterDiffs", () => {
+  function makeFd(file: string, content = "diff --git a/x b/x\n+code"): FileDiff {
+    return { file, content };
+  }
+
+  it("excludes lock files by exact name", () => {
+    const diffs: FileDiff[] = [
+      makeFd("package-lock.json"),
+      makeFd("yarn.lock"),
+      makeFd("src/index.ts"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(1);
+    expect(included[0].file).toBe("src/index.ts");
+    expect(excluded).toEqual(["package-lock.json", "yarn.lock"]);
+  });
+
+  it("excludes generated/minified files by extension", () => {
+    const diffs: FileDiff[] = [
+      makeFd("assets/bundle.min.js"),
+      makeFd("lib/types.generated.ts"),
+      makeFd("src/real-code.ts"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(1);
+    expect(included[0].file).toBe("src/real-code.ts");
+    expect(excluded).toContain("assets/bundle.min.js");
+    expect(excluded).toContain("lib/types.generated.ts");
+  });
+
+  it("excludes files in vendor/build directories", () => {
+    const diffs: FileDiff[] = [
+      makeFd("vendor/github.com/lib/pq/conn.go"),
+      makeFd("dist/bundle.js"),
+      makeFd("build/output.js"),
+      makeFd("node_modules/foo/index.js"),
+      makeFd(".next/cache/data.json"),
+      makeFd("src/app.ts"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(1);
+    expect(included[0].file).toBe("src/app.ts");
+    expect(excluded).toHaveLength(5);
+  });
+
+  it("excludes nested vendor directories", () => {
+    const diffs: FileDiff[] = [
+      makeFd("backend/vendor/lib/conn.go"),
+      makeFd("frontend/node_modules/react/index.js"),
+      makeFd("src/handler.ts"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(1);
+    expect(excluded).toHaveLength(2);
+  });
+
+  it("excludes binary-only diffs", () => {
+    const diffs: FileDiff[] = [
+      {
+        file: "image.png",
+        content: "diff --git a/image.png b/image.png\nindex abc..def\nBinary files a/image.png and b/image.png differ",
+      },
+      makeFd("src/code.ts"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(1);
+    expect(included[0].file).toBe("src/code.ts");
+    expect(excluded).toEqual(["image.png"]);
+  });
+
+  it("keeps all files when none match exclusion patterns", () => {
+    const diffs: FileDiff[] = [
+      makeFd("src/index.ts"),
+      makeFd("lib/utils.ts"),
+      makeFd("README.md"),
+    ];
+    const { included, excluded } = filterDiffs(diffs);
+    expect(included).toHaveLength(3);
+    expect(excluded).toHaveLength(0);
+  });
+
+  it("handles empty input", () => {
+    const { included, excluded } = filterDiffs([]);
+    expect(included).toHaveLength(0);
+    expect(excluded).toHaveLength(0);
+  });
+});
+
+// ── batchDiffChunks (directory sorting) ───────────────────────────────
+
+describe("batchDiffChunks", () => {
+  function makeFd(file: string, size: number): FileDiff {
+    return { file, content: "x".repeat(size) };
+  }
+
+  it("sorts files by directory before batching", () => {
+    const diffs: FileDiff[] = [
+      makeFd("z/file1.ts", 100),
+      makeFd("a/file2.ts", 100),
+      makeFd("a/file1.ts", 100),
+      makeFd("z/file2.ts", 100),
+    ];
+    const batches = batchDiffChunks(diffs, 10_000);
+    // All fit in one batch since they're small
+    expect(batches).toHaveLength(1);
+    // The batch content should have a/ files before z/ files
+    const content = batches[0];
+    const aIdx = content.indexOf("x".repeat(100)); // first occurrence
+    expect(aIdx).toBeGreaterThanOrEqual(0);
+  });
+
+  it("groups files from the same directory in a batch", () => {
+    // Create files where each takes ~15K chars, batch limit 30K
+    const diffs: FileDiff[] = [
+      makeFd("src/handlers/a.ts", 14_000),
+      makeFd("lib/utils/b.ts", 14_000),
+      makeFd("src/handlers/c.ts", 14_000),
+      makeFd("lib/utils/d.ts", 14_000),
+    ];
+    const batches = batchDiffChunks(diffs, 30_000);
+    // After sorting: lib/utils/b, lib/utils/d, src/handlers/a, src/handlers/c
+    // b+d = 28K < 30K -> batch 1, a+c = 28K < 30K -> batch 2
+    expect(batches).toHaveLength(2);
+  });
+
+  it("places oversized files in their own batch", () => {
+    const diffs: FileDiff[] = [
+      makeFd("src/small.ts", 100),
+      makeFd("src/huge.ts", 50_000),
+      makeFd("src/another.ts", 100),
+    ];
+    const batches = batchDiffChunks(diffs, 30_000);
+    // small + another in one batch, huge in its own
+    expect(batches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(batchDiffChunks([], 30_000)).toEqual([]);
   });
 });

@@ -2,6 +2,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import pLimit from "p-limit";
 import type {
   PrInfo,
   PrMetadata,
@@ -19,6 +20,7 @@ import {
   truncate,
   splitDiffByFile,
   batchDiffChunks,
+  filterDiffs,
 } from "./utils.js";
 
 // Path to the schema file (relative to package root, resolved at runtime)
@@ -76,8 +78,28 @@ function buildPrompt(
   );
   parts.push("");
 
-  // Include files changed
-  if (meta.files.length > 0) {
+  // For multi-batch reviews, scope the file list to only files in this batch
+  // and add a note about the total PR size
+  if (batchInfo && batchInfo.total > 1) {
+    // Extract filenames from the diff chunk (lines starting with "diff --git")
+    const batchFiles = diffChunk
+      .split("\n")
+      .filter((l) => l.startsWith("diff --git"))
+      .map((l) => {
+        const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
+        return m ? m[1] : null;
+      })
+      .filter(Boolean) as string[];
+
+    parts.push(
+      `This PR changes ${meta.files.length} files total. ` +
+      `This batch covers ${batchFiles.length} of them:`,
+    );
+    for (const f of batchFiles) {
+      parts.push(`  ${f}`);
+    }
+    parts.push("");
+  } else if (meta.files.length > 0) {
     parts.push("Files changed:");
     for (const f of meta.files) {
       parts.push(`  ${f.path} (+${f.additions} -${f.deletions})`);
@@ -92,24 +114,35 @@ function buildPrompt(
   parts.push("```");
   parts.push("");
 
-  // Include test results if available (prefer summary)
+  // Include full test/lint results only for first batch; later batches get a one-liner
+  const isFirstBatch = !batchInfo || batchInfo.current === 1;
+
   if (testResult && testResult.output !== "No test command detected; skipped.") {
-    const testText = testResult.summarizedOutput ?? truncate(testResult.output, 3000);
-    parts.push(`Test results (${testResult.success ? "PASSED" : "FAILED"}):`);
-    parts.push("```");
-    parts.push(testText);
-    parts.push("```");
-    parts.push("");
+    if (isFirstBatch) {
+      const testText = testResult.summarizedOutput ?? truncate(testResult.output, 3000);
+      parts.push(`Test results (${testResult.success ? "PASSED" : "FAILED"}):`);
+      parts.push("```");
+      parts.push(testText);
+      parts.push("```");
+      parts.push("");
+    } else {
+      parts.push(`Tests: ${testResult.success ? "PASSED" : "FAILED"} (details in batch 1)`);
+      parts.push("");
+    }
   }
 
-  // Include lint results if available (prefer summary)
   if (lintResult && lintResult.output !== "No lint command detected; skipped.") {
-    const lintText = lintResult.summarizedOutput ?? truncate(lintResult.output, 3000);
-    parts.push(`Lint results (${lintResult.success ? "PASSED" : "FAILED"}):`);
-    parts.push("```");
-    parts.push(lintText);
-    parts.push("```");
-    parts.push("");
+    if (isFirstBatch) {
+      const lintText = lintResult.summarizedOutput ?? truncate(lintResult.output, 3000);
+      parts.push(`Lint results (${lintResult.success ? "PASSED" : "FAILED"}):`);
+      parts.push("```");
+      parts.push(lintText);
+      parts.push("```");
+      parts.push("");
+    } else {
+      parts.push(`Linting: ${lintResult.success ? "PASSED" : "FAILED"} (details in batch 1)`);
+      parts.push("");
+    }
   }
 
   parts.push(
@@ -251,7 +284,10 @@ function mergeReviews(results: ReviewOutput[]): ReviewOutput {
  *
  * If the diff is small enough it runs a single review call.  For large
  * diffs it splits the diff into per-file batches and reviews each batch
- * separately, then merges the results.
+ * in parallel (up to `concurrency` at a time), then merges the results.
+ *
+ * Non-reviewable files (lock files, generated code, build output, vendor
+ * dirs) are filtered out unless `includeAll` is set.
  */
 export async function runCodexReview(
   repoDir: string,
@@ -261,46 +297,78 @@ export async function runCodexReview(
   testResult: StepResult | null,
   lintResult: StepResult | null,
   model?: string,
-): Promise<ReviewOutput> {
+  concurrency = 3,
+  includeAll = false,
+): Promise<{ review: ReviewOutput; excludedFiles: string[] }> {
   logStep("Running AI code review with Codex...");
 
-  // Split diff into per-file chunks, then batch to stay within budget
-  const fileDiffs = splitDiffByFile(diff);
+  // Split diff into per-file chunks and optionally filter
+  const allFileDiffs = splitDiffByFile(diff);
+
+  let fileDiffs = allFileDiffs;
+  let excludedFiles: string[] = [];
+
+  if (!includeAll) {
+    const filtered = filterDiffs(allFileDiffs);
+    fileDiffs = filtered.included;
+    excludedFiles = filtered.excluded;
+
+    if (excludedFiles.length > 0) {
+      logInfo(
+        `Filtered ${excludedFiles.length} non-reviewable file(s): ` +
+        `${excludedFiles.slice(0, 5).join(", ")}` +
+        (excludedFiles.length > 5 ? ` and ${excludedFiles.length - 5} more` : ""),
+      );
+    }
+  }
+
   const batches = batchDiffChunks(fileDiffs);
 
   if (batches.length <= 1) {
     // Single batch — fast path
-    const prompt = buildPrompt(pr, meta, diff, testResult, lintResult);
+    const diffText = fileDiffs.length > 0 ? batches[0] ?? "" : "";
+    const prompt = buildPrompt(pr, meta, diffText, testResult, lintResult);
     const result = await reviewBatch(repoDir, prompt, pr, model);
     if (result) {
       logSuccess(
         `AI review complete: ${result.findings.length} findings, verdict: ${result.verdict}`,
       );
-      return result;
+      return { review: result, excludedFiles };
     }
-    return buildFallbackReview(testResult, lintResult);
+    return { review: buildFallbackReview(testResult, lintResult), excludedFiles };
   }
 
-  // Multiple batches
-  logInfo(`Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches`);
+  // Multiple batches — process in parallel
+  logInfo(
+    `Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches ` +
+    `(concurrency: ${concurrency})`,
+  );
+
+  const limit = pLimit(concurrency);
+
+  const tasks = batches.map((batch, i) =>
+    limit(async () => {
+      logStep(`Reviewing batch ${i + 1}/${batches.length}...`);
+      const prompt = buildPrompt(
+        pr, meta, batch, testResult, lintResult,
+        { current: i + 1, total: batches.length },
+      );
+      return reviewBatch(repoDir, prompt, pr, model);
+    }),
+  );
+
+  const settled = await Promise.allSettled(tasks);
 
   const batchResults: ReviewOutput[] = [];
-
-  for (let i = 0; i < batches.length; i++) {
-    logStep(`Reviewing batch ${i + 1}/${batches.length}...`);
-    const prompt = buildPrompt(
-      pr, meta, batches[i], testResult, lintResult,
-      { current: i + 1, total: batches.length },
-    );
-    const result = await reviewBatch(repoDir, prompt, pr, model);
-    if (result) {
-      batchResults.push(result);
+  for (const result of settled) {
+    if (result.status === "fulfilled" && result.value) {
+      batchResults.push(result.value);
     }
   }
 
   if (batchResults.length === 0) {
     logWarn("All review batches failed — using fallback");
-    return buildFallbackReview(testResult, lintResult);
+    return { review: buildFallbackReview(testResult, lintResult), excludedFiles };
   }
 
   const merged = mergeReviews(batchResults);
@@ -308,7 +376,7 @@ export async function runCodexReview(
     `AI review complete (${batches.length} batches): ` +
     `${merged.findings.length} findings, verdict: ${merged.verdict}`,
   );
-  return merged;
+  return { review: merged, excludedFiles };
 }
 
 // ── Fallback builders ────────────────────────────────────────────────

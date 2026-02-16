@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import yaml from "js-yaml";
+import pLimit from "p-limit";
 import type {
   PrInfo,
   PrMetadata,
@@ -20,6 +21,7 @@ import {
   truncate,
   splitDiffByFile,
   batchDiffChunks,
+  filterDiffs,
 } from "./utils.js";
 
 // Path to the architecture review schema (relative to package root)
@@ -102,8 +104,26 @@ function buildArchPrompt(
   );
   parts.push("");
 
-  // Files changed
-  if (meta.files.length > 0) {
+  // For multi-batch reviews, scope the file list to only files in this batch
+  if (batchInfo && batchInfo.total > 1) {
+    const batchFiles = diffChunk
+      .split("\n")
+      .filter((l) => l.startsWith("diff --git"))
+      .map((l) => {
+        const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
+        return m ? m[1] : null;
+      })
+      .filter(Boolean) as string[];
+
+    parts.push(
+      `This PR changes ${meta.files.length} files total. ` +
+      `This batch covers ${batchFiles.length} of them:`,
+    );
+    for (const f of batchFiles) {
+      parts.push(`  ${f}`);
+    }
+    parts.push("");
+  } else if (meta.files.length > 0) {
     parts.push("Files changed:");
     for (const f of meta.files) {
       parts.push(`  ${f.path} (+${f.additions} -${f.deletions})`);
@@ -329,7 +349,9 @@ function mergeArchReviews(results: ArchReviewOutput[]): ArchReviewOutput {
  * Run the architecture conformance review using Codex CLI.
  *
  * For large diffs the review is split into per-file batches, each
- * reviewed independently and then merged.
+ * reviewed in parallel (up to `concurrency` at a time) and then merged.
+ *
+ * Non-reviewable files are filtered out unless `includeAll` is set.
  */
 export async function runArchReview(
   repoDir: string,
@@ -337,6 +359,8 @@ export async function runArchReview(
   meta: PrMetadata,
   diff: string,
   model?: string,
+  concurrency = 3,
+  includeAll = false,
 ): Promise<ArchReviewOutput> {
   logStep("Running architecture conformance review with Codex...");
 
@@ -348,13 +372,22 @@ export async function runArchReview(
     logWarn("No .arch-rules.yml found — AI will infer architecture from codebase");
   }
 
-  // Split diff into per-file chunks, then batch to stay within budget
-  const fileDiffs = splitDiffByFile(diff);
+  // Split diff into per-file chunks and optionally filter
+  const allFileDiffs = splitDiffByFile(diff);
+
+  let fileDiffs = allFileDiffs;
+  if (!includeAll) {
+    const filtered = filterDiffs(allFileDiffs);
+    fileDiffs = filtered.included;
+    // Exclusion logging is done by the code review pass; skip here to avoid duplication
+  }
+
   const batches = batchDiffChunks(fileDiffs);
 
   if (batches.length <= 1) {
     // Single batch — fast path
-    const prompt = buildArchPrompt(pr, meta, diff, rules);
+    const diffText = fileDiffs.length > 0 ? batches[0] ?? "" : "";
+    const prompt = buildArchPrompt(pr, meta, diffText, rules);
     const result = await archReviewBatch(repoDir, prompt, pr, model);
     if (result) {
       logSuccess(
@@ -366,20 +399,31 @@ export async function runArchReview(
     return buildFallbackArchReview();
   }
 
-  // Multiple batches
-  logInfo(`Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches`);
+  // Multiple batches — process in parallel
+  logInfo(
+    `Diff is large (${fileDiffs.length} files) — splitting into ${batches.length} batches ` +
+    `(concurrency: ${concurrency})`,
+  );
+
+  const limit = pLimit(concurrency);
+
+  const tasks = batches.map((batch, i) =>
+    limit(async () => {
+      logStep(`Architecture review batch ${i + 1}/${batches.length}...`);
+      const prompt = buildArchPrompt(
+        pr, meta, batch, rules,
+        { current: i + 1, total: batches.length },
+      );
+      return archReviewBatch(repoDir, prompt, pr, model);
+    }),
+  );
+
+  const settled = await Promise.allSettled(tasks);
 
   const batchResults: ArchReviewOutput[] = [];
-
-  for (let i = 0; i < batches.length; i++) {
-    logStep(`Architecture review batch ${i + 1}/${batches.length}...`);
-    const prompt = buildArchPrompt(
-      pr, meta, batches[i], rules,
-      { current: i + 1, total: batches.length },
-    );
-    const result = await archReviewBatch(repoDir, prompt, pr, model);
-    if (result) {
-      batchResults.push(result);
+  for (const result of settled) {
+    if (result.status === "fulfilled" && result.value) {
+      batchResults.push(result.value);
     }
   }
 

@@ -208,20 +208,131 @@ export function splitDiffByFile(diff: string): FileDiff[] {
   return files;
 }
 
+// ── File exclusion for large PRs ──────────────────────────────────────
+
+/** Exact filenames that should be excluded from AI review. */
+const EXCLUDED_FILENAMES = new Set([
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "Cargo.lock",
+  "go.sum",
+  "poetry.lock",
+  "composer.lock",
+  "Gemfile.lock",
+  "Pipfile.lock",
+  "shrinkwrap.yaml",
+  "flake.lock",
+]);
+
+/** Glob-style suffix/extension patterns for generated or minified files. */
+const EXCLUDED_EXTENSIONS = [
+  ".min.js",
+  ".min.css",
+  ".min.map",
+  ".generated.ts",
+  ".generated.js",
+  ".g.dart",
+  ".pb.go",
+  ".pb.ts",
+  ".pb.js",
+  ".snap",
+];
+
+/** Directory prefixes that indicate non-reviewable content. */
+const EXCLUDED_DIR_PREFIXES = [
+  "vendor/",
+  "node_modules/",
+  "third_party/",
+  "dist/",
+  "build/",
+  "out/",
+  ".next/",
+  "coverage/",
+  "__pycache__/",
+  ".tox/",
+];
+
+/** Result of filtering file diffs. */
+export interface FilterResult {
+  included: FileDiff[];
+  excluded: string[];
+}
+
+/**
+ * Filter out non-reviewable files from the diff list.
+ *
+ * Removes lock files, generated/minified code, build output,
+ * vendor directories, and binary-only diffs.  Returns both the
+ * filtered list and the names of excluded files (for logging).
+ */
+export function filterDiffs(fileDiffs: FileDiff[]): FilterResult {
+  const included: FileDiff[] = [];
+  const excluded: string[] = [];
+
+  for (const fd of fileDiffs) {
+    if (shouldExclude(fd)) {
+      excluded.push(fd.file);
+    } else {
+      included.push(fd);
+    }
+  }
+
+  return { included, excluded };
+}
+
+function shouldExclude(fd: FileDiff): boolean {
+  const basename = fd.file.split("/").pop() ?? fd.file;
+
+  // Exact filename match (lock files)
+  if (EXCLUDED_FILENAMES.has(basename)) return true;
+
+  // Extension-based match (generated / minified)
+  for (const ext of EXCLUDED_EXTENSIONS) {
+    if (basename.endsWith(ext)) return true;
+  }
+
+  // Directory prefix match (vendor, build output)
+  for (const prefix of EXCLUDED_DIR_PREFIXES) {
+    if (fd.file.startsWith(prefix) || fd.file.includes(`/${prefix}`)) return true;
+  }
+
+  // Binary-only diffs (contain only "Binary files ... differ")
+  const trimmed = fd.content
+    .split("\n")
+    .filter((l) => !l.startsWith("diff --git") && !l.startsWith("index ") && l.trim() !== "")
+    .join("\n")
+    .trim();
+  if (/^Binary files .+ differ$/.test(trimmed)) return true;
+
+  return false;
+}
+
 /**
  * Group per-file diffs into batches where each batch stays under
  * `maxCharsPerBatch` characters.  Files that are individually larger
  * than the budget are placed in their own solo batch.
+ *
+ * Files are sorted by directory path before packing so that related
+ * files (same module/package) land in the same batch for better
+ * cross-file context.
  */
 export function batchDiffChunks(
   fileDiffs: FileDiff[],
   maxCharsPerBatch = 30_000,
 ): string[] {
+  // Sort by directory so related files land in the same batch
+  const sorted = [...fileDiffs].sort((a, b) => {
+    const dirA = a.file.includes("/") ? a.file.slice(0, a.file.lastIndexOf("/")) : "";
+    const dirB = b.file.includes("/") ? b.file.slice(0, b.file.lastIndexOf("/")) : "";
+    return dirA.localeCompare(dirB) || a.file.localeCompare(b.file);
+  });
+
   const batches: string[] = [];
   let currentBatch: string[] = [];
   let currentSize = 0;
 
-  for (const fd of fileDiffs) {
+  for (const fd of sorted) {
     const entrySize = fd.content.length;
 
     // If adding this file would exceed the budget, flush current batch first

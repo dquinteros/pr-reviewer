@@ -97,6 +97,8 @@ export interface CliOptions {
   skipReview: boolean;
   skipArch: boolean;
   model?: string;
+  concurrency: number;
+  includeAll: boolean;
 }
 
 // ── Architecture Conformance Review types ─────────────────────────────

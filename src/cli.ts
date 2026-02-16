@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import ora from "ora";
 import chalk from "chalk";
-import type { CliOptions, StepResult, ArchReviewOutput } from "./types.js";
+import type { CliOptions, StepResult, ArchReviewOutput, ReviewFinding } from "./types.js";
 import {
   parsePrUrl,
   fetchPrMetadata,
@@ -60,6 +60,8 @@ program
   .option("--skip-review", "Skip AI code review (only run tests/lint)", false)
   .option("--skip-arch", "Skip architecture conformance review", false)
   .option("-m, --model <model>", "Codex model to use (e.g. gpt-5.3-codex)")
+  .option("-c, --concurrency <n>", "Max parallel Codex calls for batch processing", "3")
+  .option("--include-all", "Disable file filtering (review lock files, generated code, etc.)", false)
   .action(async (prUrl: string, opts: CliOptions) => {
     await run(prUrl, opts);
   });
@@ -185,44 +187,45 @@ async function run(prUrl: string, opts: CliOptions): Promise<void> {
       }
     }
 
-    // ── Step 8: AI Code Review ───────────────────────────────────
-    let review;
-    if (!opts.skipReview) {
-      review = await runCodexReview(
-        repoDir,
-        pr,
-        meta,
-        diff,
-        testResult,
-        lintResult,
-        opts.model,
-      );
-    } else {
-      logInfo("Skipping AI review (--skip-review)");
-      review = {
-        summary: "AI review was skipped.",
-        findings: [],
-        verdict: "comment" as const,
-      };
-    }
+    // ── Step 8 & 9: AI Code Review + Architecture Review (parallel) ──
+    const concurrency = Math.max(1, parseInt(String(opts.concurrency), 10) || 3);
 
-    // ── Step 9: Architecture Conformance Review ───────────────────
-    let archReview: ArchReviewOutput | null = null;
-    if (!opts.skipArch && !opts.skipReview) {
-      archReview = await runArchReview(
-        repoDir,
-        pr,
-        meta,
-        diff,
-        opts.model,
-      );
-    } else if (opts.skipArch) {
-      logInfo("Skipping architecture review (--skip-arch)");
-    }
+    const skippedReview = {
+      review: {
+        summary: "AI review was skipped.",
+        findings: [] as ReviewFinding[],
+        verdict: "comment" as const,
+      },
+      excludedFiles: [] as string[],
+    };
+
+    const codeReviewPromise = !opts.skipReview
+      ? runCodexReview(
+          repoDir, pr, meta, diff,
+          testResult, lintResult,
+          opts.model, concurrency, opts.includeAll,
+        )
+      : (logInfo("Skipping AI review (--skip-review)"), Promise.resolve(skippedReview));
+
+    const archReviewPromise = (!opts.skipArch && !opts.skipReview)
+      ? runArchReview(
+          repoDir, pr, meta, diff,
+          opts.model, concurrency, opts.includeAll,
+        )
+      : (opts.skipArch && logInfo("Skipping architecture review (--skip-arch)"),
+         Promise.resolve(null as ArchReviewOutput | null));
+
+    const [codeResult, archReview] = await Promise.all([
+      codeReviewPromise,
+      archReviewPromise,
+    ]);
+
+    const review = codeResult.review;
+    const excludedFiles = codeResult.excludedFiles;
 
     // ── Step 10: Build and post review ───────────────────────────
     logStep("Building review payload...");
-    const payload = buildReviewPayload(review, meta, diff, testResult, lintResult, archReview);
+    const payload = buildReviewPayload(review, meta, diff, testResult, lintResult, archReview, excludedFiles);
 
     logInfo(
       `Review: ${payload.event} with ${payload.comments.length} inline comments`,

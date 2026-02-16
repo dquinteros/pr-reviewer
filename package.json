@@ -45,7 +45,8 @@
     "commander": "^13.1.0",
     "execa": "^9.5.2",
     "js-yaml": "^4.1.1",
-    "ora": "^8.2.0"
+    "ora": "^8.2.0",
+    "p-limit": "^7.3.0"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
