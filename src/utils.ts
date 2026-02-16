@@ -360,3 +360,79 @@ export function batchDiffChunks(
 
   return batches;
 }
+
+// ── File group description ────────────────────────────────────────────
+
+/**
+ * Given a list of file paths, return a human-readable description of the
+ * directories they belong to.  Groups files by their top-level directory
+ * (or second-level if all share the same top-level) and returns a concise
+ * string such as `"src/auth/ and src/api/"`.
+ *
+ * Falls back to listing individual files when there are very few.
+ */
+export function describeFileGroup(files: string[]): string {
+  if (files.length === 0) return "no files";
+  if (files.length <= 2) return files.join(" and ");
+
+  // Collect the directory portion of each file
+  const dirs = files.map((f) => {
+    const idx = f.lastIndexOf("/");
+    return idx >= 0 ? f.slice(0, idx + 1) : "";
+  });
+
+  // Deduplicate directories
+  const uniqueDirs = [...new Set(dirs)].filter(Boolean);
+
+  if (uniqueDirs.length === 0) {
+    // All files are in the root directory
+    return files.join(", ");
+  }
+
+  // If all directories share a common prefix, try to go one level deeper
+  // to give a more meaningful grouping.
+  // e.g., ["src/auth/", "src/api/"] -> keep as-is
+  // e.g., ["src/services/auth/", "src/services/users/"] -> keep as-is
+  // Collapse sub-directories that share a parent into just the parent
+  const collapsed = collapseDirectories(uniqueDirs);
+
+  if (collapsed.length <= 4) {
+    return collapsed.join(", ");
+  }
+
+  // Too many directories — show the first few and summarize
+  return `${collapsed.slice(0, 3).join(", ")} and ${collapsed.length - 3} other directories`;
+}
+
+/**
+ * Collapse a list of directory paths: if multiple sub-directories share
+ * the same parent, replace them with the parent.  Applies one level of
+ * collapsing to keep descriptions concise.
+ */
+function collapseDirectories(dirs: string[]): string[] {
+  // Group by parent directory
+  const parentMap = new Map<string, string[]>();
+
+  for (const dir of dirs) {
+    // Remove trailing slash for splitting, then get parent
+    const clean = dir.endsWith("/") ? dir.slice(0, -1) : dir;
+    const slashIdx = clean.lastIndexOf("/");
+    const parent = slashIdx >= 0 ? clean.slice(0, slashIdx + 1) : "";
+    if (!parentMap.has(parent)) {
+      parentMap.set(parent, []);
+    }
+    parentMap.get(parent)!.push(dir);
+  }
+
+  const result: string[] = [];
+  for (const [parent, children] of parentMap) {
+    if (children.length >= 3 && parent) {
+      // Collapse into parent
+      result.push(parent);
+    } else {
+      result.push(...children);
+    }
+  }
+
+  return result.sort();
+}

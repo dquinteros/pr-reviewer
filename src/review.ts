@@ -21,11 +21,13 @@ import {
   splitDiffByFile,
   batchDiffChunks,
   filterDiffs,
+  describeFileGroup,
 } from "./utils.js";
 
 // Path to the schema file (relative to package root, resolved at runtime)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = resolve(__dirname, "..", "schemas", "review-output.json");
+const CONSOLIDATION_SCHEMA = resolve(__dirname, "..", "schemas", "summary-consolidation.json");
 
 // ── Verdict severity for merging ─────────────────────────────────────
 
@@ -58,10 +60,22 @@ function buildPrompt(
     `You are reviewing Pull Request #${pr.number} in ${pr.owner}/${pr.repo}.`,
   );
 
+  // Extract filenames from the diff chunk for multi-part reviews
+  const batchFiles = diffChunk
+    .split("\n")
+    .filter((l) => l.startsWith("diff --git"))
+    .map((l) => {
+      const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
+      return m ? m[1] : null;
+    })
+    .filter(Boolean) as string[];
+
   if (batchInfo && batchInfo.total > 1) {
+    const fileGroupDesc = describeFileGroup(batchFiles);
     parts.push(
-      `(Reviewing diff batch ${batchInfo.current} of ${batchInfo.total} — ` +
-      `focus only on the files in THIS batch.)`,
+      `You are reviewing a subset of the PR changes. ` +
+      `This review covers files in: ${fileGroupDesc}. ` +
+      `Focus only on these files.`,
     );
   }
 
@@ -78,22 +92,11 @@ function buildPrompt(
   );
   parts.push("");
 
-  // For multi-batch reviews, scope the file list to only files in this batch
-  // and add a note about the total PR size
+  // For multi-part reviews, scope the file list to only files in this review
   if (batchInfo && batchInfo.total > 1) {
-    // Extract filenames from the diff chunk (lines starting with "diff --git")
-    const batchFiles = diffChunk
-      .split("\n")
-      .filter((l) => l.startsWith("diff --git"))
-      .map((l) => {
-        const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
-        return m ? m[1] : null;
-      })
-      .filter(Boolean) as string[];
-
     parts.push(
       `This PR changes ${meta.files.length} files total. ` +
-      `This batch covers ${batchFiles.length} of them:`,
+      `Files included in this review:`,
     );
     for (const f of batchFiles) {
       parts.push(`  ${f}`);
@@ -114,7 +117,7 @@ function buildPrompt(
   parts.push("```");
   parts.push("");
 
-  // Include full test/lint results only for first batch; later batches get a one-liner
+  // Include full test/lint results only for the first review segment
   const isFirstBatch = !batchInfo || batchInfo.current === 1;
 
   if (testResult && testResult.output !== "No test command detected; skipped.") {
@@ -126,7 +129,7 @@ function buildPrompt(
       parts.push("```");
       parts.push("");
     } else {
-      parts.push(`Tests: ${testResult.success ? "PASSED" : "FAILED"} (details in batch 1)`);
+      parts.push(`Tests: ${testResult.success ? "PASSED" : "FAILED"} (full output provided in a separate review segment)`);
       parts.push("");
     }
   }
@@ -140,7 +143,7 @@ function buildPrompt(
       parts.push("```");
       parts.push("");
     } else {
-      parts.push(`Linting: ${lintResult.success ? "PASSED" : "FAILED"} (details in batch 1)`);
+      parts.push(`Linting: ${lintResult.success ? "PASSED" : "FAILED"} (full output provided in a separate review segment)`);
       parts.push("");
     }
   }
@@ -164,6 +167,14 @@ function buildPrompt(
   parts.push(
     "Set verdict to 'request_changes' if there are critical or warning-level issues, " +
     "'approve' if everything looks good, or 'comment' if there are only minor suggestions.",
+  );
+  parts.push("");
+  parts.push(
+    "IMPORTANT: Write your summary and findings as if reviewing the entire PR. " +
+    "Do NOT reference \"batches\", \"segments\", \"chunks\", or any internal processing details. " +
+    "When referring to groups of changes, use specific file paths, folder names, " +
+    "or the business/domain concepts they relate to (e.g., \"the authentication module\", " +
+    "\"changes in src/api/\").",
   );
 
   return parts.join("\n");
@@ -277,6 +288,75 @@ function mergeReviews(results: ReviewOutput[]): ReviewOutput {
   };
 }
 
+// ── Summary consolidation ────────────────────────────────────────
+
+/**
+ * Consolidate multiple per-segment summaries into a single cohesive
+ * summary that references files, folders, and business concepts instead
+ * of internal processing details.
+ *
+ * Falls back to the raw joined summaries if the consolidation call fails.
+ */
+async function consolidateSummaries(
+  rawSummary: string,
+  repoDir: string,
+  pr: PrInfo,
+  model?: string,
+): Promise<string> {
+  const prompt =
+    "Consolidate the following per-section review summaries into a single " +
+    "cohesive PR review summary. Reference specific files, folders, and " +
+    "business/domain concepts the developer would recognize.\n" +
+    "Do NOT mention \"batches\", \"segments\", \"chunks\", or any internal " +
+    "processing details.\n" +
+    "Return a concise summary (max 2000 characters).\n\n" +
+    "---\n" +
+    rawSummary +
+    "\n---";
+
+  const outputPath = join(tmpdir(), `pr-consolidate-${pr.number}-${Date.now()}.json`);
+
+  const args: string[] = [
+    "exec",
+    "--yolo",
+    "--cd",
+    repoDir,
+    "--output-schema",
+    CONSOLIDATION_SCHEMA,
+    "-o",
+    outputPath,
+  ];
+
+  if (model) {
+    args.push("--model", model);
+  }
+
+  args.push(prompt);
+
+  try {
+    const result = await exec("codex", args, { timeout: 60 * 1000 });
+
+    if (!result.success) {
+      logWarn("Summary consolidation failed, using raw summaries");
+      return rawSummary;
+    }
+
+    const raw = await readFile(outputPath, "utf-8");
+    const parsed = JSON.parse(raw) as { summary: string };
+
+    if (parsed.summary && parsed.summary.length > 0) {
+      return parsed.summary;
+    }
+
+    return rawSummary;
+  } catch {
+    logWarn("Summary consolidation failed, using raw summaries");
+    return rawSummary;
+  } finally {
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /**
@@ -372,6 +452,13 @@ export async function runCodexReview(
   }
 
   const merged = mergeReviews(batchResults);
+
+  // Consolidate per-segment summaries into a single developer-friendly summary
+  if (batchResults.length > 1) {
+    logStep("Consolidating review summaries...");
+    merged.summary = await consolidateSummaries(merged.summary, repoDir, pr, model);
+  }
+
   logSuccess(
     `AI review complete (${batches.length} batches): ` +
     `${merged.findings.length} findings, verdict: ${merged.verdict}`,

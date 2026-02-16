@@ -22,11 +22,13 @@ import {
   splitDiffByFile,
   batchDiffChunks,
   filterDiffs,
+  describeFileGroup,
 } from "./utils.js";
 
 // Path to the architecture review schema (relative to package root)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ARCH_SCHEMA_PATH = resolve(__dirname, "..", "schemas", "arch-review-output.json");
+const CONSOLIDATION_SCHEMA = resolve(__dirname, "..", "schemas", "summary-consolidation.json");
 
 // ── Load architecture rules ──────────────────────────────────────────
 
@@ -84,10 +86,22 @@ function buildArchPrompt(
     "project's architecture rules and conventions.",
   );
 
+  // Extract filenames from the diff chunk for multi-part reviews
+  const batchFiles = diffChunk
+    .split("\n")
+    .filter((l) => l.startsWith("diff --git"))
+    .map((l) => {
+      const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
+      return m ? m[1] : null;
+    })
+    .filter(Boolean) as string[];
+
   if (batchInfo && batchInfo.total > 1) {
+    const fileGroupDesc = describeFileGroup(batchFiles);
     parts.push(
-      `(Reviewing diff batch ${batchInfo.current} of ${batchInfo.total} — ` +
-      `focus only on the files in THIS batch.)`,
+      `You are reviewing a subset of the PR changes. ` +
+      `This review covers files in: ${fileGroupDesc}. ` +
+      `Focus only on these files.`,
     );
   }
 
@@ -104,20 +118,11 @@ function buildArchPrompt(
   );
   parts.push("");
 
-  // For multi-batch reviews, scope the file list to only files in this batch
+  // For multi-part reviews, scope the file list to only files in this review
   if (batchInfo && batchInfo.total > 1) {
-    const batchFiles = diffChunk
-      .split("\n")
-      .filter((l) => l.startsWith("diff --git"))
-      .map((l) => {
-        const m = l.match(/^diff --git a\/.+ b\/(.+)$/);
-        return m ? m[1] : null;
-      })
-      .filter(Boolean) as string[];
-
     parts.push(
       `This PR changes ${meta.files.length} files total. ` +
-      `This batch covers ${batchFiles.length} of them:`,
+      `Files included in this review:`,
     );
     for (const f of batchFiles) {
       parts.push(`  ${f}`);
@@ -225,6 +230,14 @@ function buildArchPrompt(
   parts.push(
     "If the PR changes are fully conformant, return an empty violations " +
     "array and a score of 100.",
+  );
+  parts.push("");
+  parts.push(
+    "IMPORTANT: Write your summary as if reviewing the entire PR. " +
+    "Do NOT reference \"batches\", \"segments\", \"chunks\", or any internal processing details. " +
+    "When referring to groups of changes, use specific file paths, folder names, " +
+    "or the business/domain concepts they relate to (e.g., \"the authentication module\", " +
+    "\"changes in src/api/\").",
   );
 
   return parts.join("\n");
@@ -343,6 +356,75 @@ function mergeArchReviews(results: ArchReviewOutput[]): ArchReviewOutput {
   };
 }
 
+// ── Summary consolidation ────────────────────────────────────────
+
+/**
+ * Consolidate multiple per-segment architecture review summaries into a
+ * single cohesive summary that references files, folders, and business
+ * concepts instead of internal processing details.
+ *
+ * Falls back to the raw joined summaries if the consolidation call fails.
+ */
+async function consolidateArchSummaries(
+  rawSummary: string,
+  repoDir: string,
+  pr: PrInfo,
+  model?: string,
+): Promise<string> {
+  const prompt =
+    "Consolidate the following per-section architecture review summaries into " +
+    "a single cohesive architecture conformance summary. Reference specific " +
+    "files, folders, and business/domain concepts the developer would recognize.\n" +
+    "Do NOT mention \"batches\", \"segments\", \"chunks\", or any internal " +
+    "processing details.\n" +
+    "Return a concise summary (max 2000 characters).\n\n" +
+    "---\n" +
+    rawSummary +
+    "\n---";
+
+  const outputPath = join(tmpdir(), `pr-arch-consolidate-${pr.number}-${Date.now()}.json`);
+
+  const args: string[] = [
+    "exec",
+    "--yolo",
+    "--cd",
+    repoDir,
+    "--output-schema",
+    CONSOLIDATION_SCHEMA,
+    "-o",
+    outputPath,
+  ];
+
+  if (model) {
+    args.push("--model", model);
+  }
+
+  args.push(prompt);
+
+  try {
+    const result = await exec("codex", args, { timeout: 60 * 1000 });
+
+    if (!result.success) {
+      logWarn("Architecture summary consolidation failed, using raw summaries");
+      return rawSummary;
+    }
+
+    const raw = await readFile(outputPath, "utf-8");
+    const parsed = JSON.parse(raw) as { summary: string };
+
+    if (parsed.summary && parsed.summary.length > 0) {
+      return parsed.summary;
+    }
+
+    return rawSummary;
+  } catch {
+    logWarn("Architecture summary consolidation failed, using raw summaries");
+    return rawSummary;
+  } finally {
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /**
@@ -433,6 +515,13 @@ export async function runArchReview(
   }
 
   const merged = mergeArchReviews(batchResults);
+
+  // Consolidate per-segment summaries into a single developer-friendly summary
+  if (batchResults.length > 1) {
+    logStep("Consolidating architecture review summaries...");
+    merged.summary = await consolidateArchSummaries(merged.summary, repoDir, pr, model);
+  }
+
   logSuccess(
     `Architecture review complete (${batches.length} batches): ` +
     `score ${merged.conformance_score}/100, ${merged.violations.length} violations`,

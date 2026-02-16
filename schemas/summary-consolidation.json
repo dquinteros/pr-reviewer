@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "A single cohesive PR review summary that references specific files, folders, and business concepts."
+    }
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}
