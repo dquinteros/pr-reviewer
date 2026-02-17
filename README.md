@@ -1,6 +1,6 @@
 # ai-pr-reviewer
 
-A CLI tool that reviews GitHub pull requests using **OpenAI Codex CLI** and **GitHub CLI**. It clones the repository, runs tests and linting, performs AI-powered code review, checks architecture conformance, and posts inline suggestions plus a summary comment directly to the PR.
+A CLI tool that reviews GitHub pull requests — or local branch changes — using **OpenAI Codex CLI** and **GitHub CLI**. It clones the repository (or works in-place for local reviews), runs tests and linting, performs AI-powered code review, checks architecture conformance, and posts inline suggestions plus a summary comment directly to the PR or outputs them locally.
 
 ## Prerequisites
 
@@ -11,6 +11,8 @@ Before using `ai-pr-reviewer`, make sure you have the following installed and au
 | **Node.js** >= 18 | [nodejs.org](https://nodejs.org/) | N/A |
 | **GitHub CLI** (`gh`) | [cli.github.com](https://cli.github.com/) | `gh auth login` |
 | **Codex CLI** (`codex`) | `npm i -g @openai/codex` | `codex login` |
+
+> **Note:** The `local` subcommand does not require GitHub CLI — only Codex CLI is needed for local reviews.
 
 ### Verifying prerequisites
 
@@ -83,11 +85,42 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-arch
 # Use a specific Codex model
 ai-pr-reviewer https://github.com/owner/repo/pull/123 --model gpt-5.3-codex
 
+# Write the review in Spanish (or any language)
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --lang spanish
+
 # Combine flags
-ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model gpt-5.3-codex
+ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --lang spanish
 ```
 
-### CLI Flags Reference
+### Local review (no PR required)
+
+You can review local changes against any branch without creating a pull request:
+
+```bash
+# Review committed changes on current branch vs main
+ai-pr-reviewer local --branch main
+
+# Include uncommitted working-tree changes
+ai-pr-reviewer local --branch main --include-uncommitted
+
+# Save review to a file
+ai-pr-reviewer local --branch develop -o review.md
+
+# Skip tests, use a specific model
+ai-pr-reviewer local -b main --skip-tests -m gpt-5.3-codex
+
+# Review a different directory
+ai-pr-reviewer local -b main -d /path/to/repo
+
+# Combine flags
+ai-pr-reviewer local -b main --include-uncommitted --skip-lint -c 5 -l spanish -o -
+```
+
+By default the diff includes only committed changes (`git diff <branch>...HEAD`). Use `--include-uncommitted` to include staged and unstaged working-tree changes (`git diff <branch>`).
+
+Output goes to **stdout** by default. Use `-o <file>` to write to a file instead.
+
+### PR review flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -97,10 +130,33 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model
 | `--skip-review` | Skip AI code review (only run tests/lint) | `false` |
 | `--skip-arch` | Skip architecture conformance review | `false` |
 | `-m, --model <model>` | Codex model to use | Codex default |
+| `-c, --concurrency <n>` | Max parallel Codex calls for batch processing | `3` |
+| `--include-all` | Disable file filtering (review lock files, generated code, etc.) | `false` |
+| `-l, --lang <language>` | Language for the review output (e.g. `spanish`, `french`) | English |
+| `-o, --output <dest>` | Write review to file or stdout instead of posting to GitHub | Post to GitHub |
 | `-V, --version` | Show version number | -- |
 | `-h, --help` | Show help | -- |
 
+### Local review flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-b, --branch <branch>` | **(required)** Target branch to diff against | -- |
+| `--include-uncommitted` | Include uncommitted working-tree changes in the diff | `false` |
+| `-d, --dir <path>` | Repository directory | Current directory |
+| `--skip-tests` | Skip running the test suite | `false` |
+| `--skip-lint` | Skip running the linter | `false` |
+| `--skip-review` | Skip AI code review (only run tests/lint) | `false` |
+| `--skip-arch` | Skip architecture conformance review | `false` |
+| `-m, --model <model>` | Codex model to use | Codex default |
+| `-c, --concurrency <n>` | Max parallel Codex calls for batch processing | `3` |
+| `--include-all` | Disable file filtering (review lock files, generated code, etc.) | `false` |
+| `-l, --lang <language>` | Language for the review output (e.g. `spanish`, `french`) | English |
+| `-o, --output <dest>` | Write review to file instead of stdout | stdout |
+
 ## What It Does
+
+### PR review flow
 
 1. **Checks prerequisites** -- verifies `gh` and `codex` are installed and authenticated.
 2. **Parses the PR URL** -- extracts owner, repo, and PR number.
@@ -115,6 +171,16 @@ ai-pr-reviewer https://github.com/owner/repo/pull/123 --skip-lint --keep --model
 11. **Architecture conformance review** -- runs a separate AI analysis checking the PR changes against the project's architecture rules (from `.arch-rules.yml` if present, or AI-inferred from the codebase structure).
 12. **Posts results to GitHub** -- creates a PR review with inline comments on specific lines (using GitHub suggestion syntax) plus an overall summary comment including architecture conformance score.
 13. **Cleans up** -- removes the temporary clone (unless `--keep` is used).
+
+### Local review flow
+
+1. **Checks prerequisites** -- verifies `codex` is installed (GitHub CLI is not required).
+2. **Validates the target branch** -- ensures the branch exists locally or as a remote tracking branch.
+3. **Generates the diff** -- runs `git diff <branch>...HEAD` (or `git diff <branch>` with `--include-uncommitted`).
+4. **Detects the project type** -- same auto-detection as the PR flow.
+5. **Installs dependencies, runs tests, runs linter** -- same pipeline, running in-place in your local repo.
+6. **Performs AI code review + architecture review** -- same AI analysis as the PR flow.
+7. **Outputs results** -- writes the review to stdout or a file (no GitHub posting).
 
 ## Supported Project Types
 
@@ -308,13 +374,15 @@ reviewer/
     review-output.json      # JSON Schema for Codex code review output
     arch-review-output.json # JSON Schema for architecture review output
   src/
-    cli.ts                  # Entry point: commander CLI, orchestration
+    cli.ts                  # Entry point: commander CLI, orchestration (PR + local)
     github.ts               # gh CLI wrapper: PR metadata, clone, post review
+    local.ts                # Local git operations: diff, branch validation, context builder
     detect.ts               # Auto-detect project type and commands
     runner.ts               # Run install/test/lint, capture output
     review.ts               # Build prompt, call codex exec, parse results
     arch-review.ts          # Architecture conformance review (load rules, prompt, call codex)
     reporter.ts             # Build GitHub review payload with inline suggestions
+    summarize.ts            # AI summarization of PR descriptions and test/lint output
     types.ts                # Shared TypeScript interfaces
     utils.ts                # Exec wrapper, logger, temp dir, truncation
 ```

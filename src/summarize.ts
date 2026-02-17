@@ -68,6 +68,7 @@ export async function summarizeDescription(
   body: string,
   repoDir: string,
   model?: string,
+  lang?: string,
 ): Promise<string> {
   if (!body || body.length <= DESC_SKIP_THRESHOLD) {
     return body;
@@ -77,15 +78,18 @@ export async function summarizeDescription(
 
   const capped = truncate(body, DESC_INPUT_CAP);
 
+  const langLine = lang ? `Write the summary in ${lang}.` : "";
+
   const prompt = [
     "Summarise the following Pull Request description into a concise paragraph (max 500 characters).",
     "Focus on: what the PR changes, why, and any key design decisions mentioned.",
     "Return ONLY the summary text, no extra commentary.",
+    langLine,
     "",
     "---",
     capped,
     "---",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const summary = await codexSummarise(prompt, repoDir, model);
 
@@ -106,6 +110,7 @@ export async function summarizeTestResults(
   output: string,
   repoDir: string,
   model?: string,
+  lang?: string,
 ): Promise<string> {
   if (!output || output.length <= RESULT_SKIP_THRESHOLD) {
     return output;
@@ -115,16 +120,19 @@ export async function summarizeTestResults(
 
   const capped = truncate(output, RESULT_INPUT_CAP);
 
+  const langLine = lang ? `Write the summary in ${lang}.` : "";
+
   const prompt = [
     "Summarise the following test-runner output into a concise report (max 1000 characters).",
     "Include: total tests run, number passed/failed/skipped,",
     "and for each failure: test name, error message, and relevant stack-trace line.",
     "Return ONLY the summary text, no extra commentary.",
+    langLine,
     "",
     "---",
     capped,
     "---",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const summary = await codexSummarise(prompt, repoDir, model);
 
@@ -145,6 +153,7 @@ export async function summarizeLintResults(
   output: string,
   repoDir: string,
   model?: string,
+  lang?: string,
 ): Promise<string> {
   if (!output || output.length <= RESULT_SKIP_THRESHOLD) {
     return output;
@@ -154,16 +163,19 @@ export async function summarizeLintResults(
 
   const capped = truncate(output, RESULT_INPUT_CAP);
 
+  const langLine = lang ? `Write the summary in ${lang}.` : "";
+
   const prompt = [
     "Summarise the following linter output into a concise report (max 1000 characters).",
     "Group errors and warnings by file, include rule names and counts.",
     "Highlight the most critical issues first.",
     "Return ONLY the summary text, no extra commentary.",
+    langLine,
     "",
     "---",
     capped,
     "---",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const summary = await codexSummarise(prompt, repoDir, model);
 

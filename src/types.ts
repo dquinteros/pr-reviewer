@@ -4,6 +4,8 @@ export interface PrInfo {
   repo: string;
   number: number;
   url: string;
+  /** Human-readable context label for prompts (e.g. "local changes on feat-x against main"). */
+  label?: string;
 }
 
 /** PR metadata fetched from GitHub */
@@ -99,6 +101,18 @@ export interface CliOptions {
   model?: string;
   concurrency: number;
   includeAll: boolean;
+  lang?: string;
+  output?: string;
+}
+
+/** CLI options for the `local` subcommand */
+export interface LocalCliOptions extends CliOptions {
+  /** Target branch to diff against (e.g. "main") */
+  branch: string;
+  /** Include uncommitted working-tree changes in the diff */
+  includeUncommitted: boolean;
+  /** Repository directory (defaults to cwd) */
+  dir?: string;
 }
 
 // ── Architecture Conformance Review types ─────────────────────────────

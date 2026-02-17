@@ -74,12 +74,13 @@ function buildArchPrompt(
   diffChunk: string,
   rules: ArchRules | null,
   batchInfo?: { current: number; total: number },
+  lang?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(
     "You are an architecture conformance reviewer for " +
-    `Pull Request #${pr.number} in ${pr.owner}/${pr.repo}.`,
+    `${pr.label ?? `Pull Request #${pr.number} in ${pr.owner}/${pr.repo}`}.`,
   );
   parts.push(
     "Your job is to check whether the changes in this PR conform to the " +
@@ -240,6 +241,14 @@ function buildArchPrompt(
     "\"changes in src/api/\").",
   );
 
+  if (lang) {
+    parts.push("");
+    parts.push(
+      `IMPORTANT: Write ALL of your output (summary, violation descriptions, ` +
+      `rules, and suggestions) in ${lang}.`,
+    );
+  }
+
   return parts.join("\n");
 }
 
@@ -254,7 +263,8 @@ async function archReviewBatch(
   pr: PrInfo,
   model?: string,
 ): Promise<ArchReviewOutput | null> {
-  const outputPath = join(tmpdir(), `pr-arch-review-${pr.number}-${Date.now()}.json`);
+  const tag = pr.label ? "local" : String(pr.number);
+  const outputPath = join(tmpdir(), `pr-arch-review-${tag}-${Date.now()}.json`);
 
   const args: string[] = [
     "exec",
@@ -370,19 +380,26 @@ async function consolidateArchSummaries(
   repoDir: string,
   pr: PrInfo,
   model?: string,
+  lang?: string,
 ): Promise<string> {
+  const langInstruction = lang
+    ? `\nIMPORTANT: Write the consolidated summary in ${lang}.\n`
+    : "";
+
   const prompt =
     "Consolidate the following per-section architecture review summaries into " +
     "a single cohesive architecture conformance summary. Reference specific " +
     "files, folders, and business/domain concepts the developer would recognize.\n" +
     "Do NOT mention \"batches\", \"segments\", \"chunks\", or any internal " +
     "processing details.\n" +
-    "Return a concise summary (max 2000 characters).\n\n" +
-    "---\n" +
+    "Return a concise summary (max 2000 characters).\n" +
+    langInstruction +
+    "\n---\n" +
     rawSummary +
     "\n---";
 
-  const outputPath = join(tmpdir(), `pr-arch-consolidate-${pr.number}-${Date.now()}.json`);
+  const cTag = pr.label ? "local" : String(pr.number);
+  const outputPath = join(tmpdir(), `pr-arch-consolidate-${cTag}-${Date.now()}.json`);
 
   const args: string[] = [
     "exec",
@@ -443,6 +460,7 @@ export async function runArchReview(
   model?: string,
   concurrency = 3,
   includeAll = false,
+  lang?: string,
 ): Promise<ArchReviewOutput> {
   logStep("Running architecture conformance review with Codex...");
 
@@ -469,7 +487,7 @@ export async function runArchReview(
   if (batches.length <= 1) {
     // Single batch — fast path
     const diffText = fileDiffs.length > 0 ? batches[0] ?? "" : "";
-    const prompt = buildArchPrompt(pr, meta, diffText, rules);
+    const prompt = buildArchPrompt(pr, meta, diffText, rules, undefined, lang);
     const result = await archReviewBatch(repoDir, prompt, pr, model);
     if (result) {
       logSuccess(
@@ -495,6 +513,7 @@ export async function runArchReview(
       const prompt = buildArchPrompt(
         pr, meta, batch, rules,
         { current: i + 1, total: batches.length },
+        lang,
       );
       return archReviewBatch(repoDir, prompt, pr, model);
     }),
@@ -519,7 +538,7 @@ export async function runArchReview(
   // Consolidate per-segment summaries into a single developer-friendly summary
   if (batchResults.length > 1) {
     logStep("Consolidating architecture review summaries...");
-    merged.summary = await consolidateArchSummaries(merged.summary, repoDir, pr, model);
+    merged.summary = await consolidateArchSummaries(merged.summary, repoDir, pr, model, lang);
   }
 
   logSuccess(

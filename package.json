@@ -1,6 +1,7 @@
 {
   "name": "ai-pr-reviewer",
-  "version": "0.1.6",
+
+  "version": "0.2.1",
   "description": "CLI tool that reviews GitHub pull requests using Codex CLI and GitHub CLI",
   "type": "module",
   "main": "dist/cli.js",

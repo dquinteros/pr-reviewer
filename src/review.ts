@@ -53,11 +53,12 @@ function buildPrompt(
   testResult: StepResult | null,
   lintResult: StepResult | null,
   batchInfo?: { current: number; total: number },
+  lang?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(
-    `You are reviewing Pull Request #${pr.number} in ${pr.owner}/${pr.repo}.`,
+    `You are reviewing ${pr.label ?? `Pull Request #${pr.number} in ${pr.owner}/${pr.repo}`}.`,
   );
 
   // Extract filenames from the diff chunk for multi-part reviews
@@ -177,6 +178,14 @@ function buildPrompt(
     "\"changes in src/api/\").",
   );
 
+  if (lang) {
+    parts.push("");
+    parts.push(
+      `IMPORTANT: Write ALL of your output (summary, finding titles, finding bodies, ` +
+      `and suggestions) in ${lang}.`,
+    );
+  }
+
   return parts.join("\n");
 }
 
@@ -191,7 +200,8 @@ async function reviewBatch(
   pr: PrInfo,
   model?: string,
 ): Promise<ReviewOutput | null> {
-  const outputPath = join(tmpdir(), `pr-review-${pr.number}-${Date.now()}.json`);
+  const tag = pr.label ? "local" : String(pr.number);
+  const outputPath = join(tmpdir(), `pr-review-${tag}-${Date.now()}.json`);
 
   const args: string[] = [
     "exec",
@@ -302,19 +312,26 @@ async function consolidateSummaries(
   repoDir: string,
   pr: PrInfo,
   model?: string,
+  lang?: string,
 ): Promise<string> {
+  const langInstruction = lang
+    ? `\nIMPORTANT: Write the consolidated summary in ${lang}.\n`
+    : "";
+
   const prompt =
     "Consolidate the following per-section review summaries into a single " +
     "cohesive PR review summary. Reference specific files, folders, and " +
     "business/domain concepts the developer would recognize.\n" +
     "Do NOT mention \"batches\", \"segments\", \"chunks\", or any internal " +
     "processing details.\n" +
-    "Return a concise summary (max 2000 characters).\n\n" +
-    "---\n" +
+    "Return a concise summary (max 2000 characters).\n" +
+    langInstruction +
+    "\n---\n" +
     rawSummary +
     "\n---";
 
-  const outputPath = join(tmpdir(), `pr-consolidate-${pr.number}-${Date.now()}.json`);
+  const cTag = pr.label ? "local" : String(pr.number);
+  const outputPath = join(tmpdir(), `pr-consolidate-${cTag}-${Date.now()}.json`);
 
   const args: string[] = [
     "exec",
@@ -379,6 +396,7 @@ export async function runCodexReview(
   model?: string,
   concurrency = 3,
   includeAll = false,
+  lang?: string,
 ): Promise<{ review: ReviewOutput; excludedFiles: string[] }> {
   logStep("Running AI code review with Codex...");
 
@@ -407,7 +425,7 @@ export async function runCodexReview(
   if (batches.length <= 1) {
     // Single batch — fast path
     const diffText = fileDiffs.length > 0 ? batches[0] ?? "" : "";
-    const prompt = buildPrompt(pr, meta, diffText, testResult, lintResult);
+    const prompt = buildPrompt(pr, meta, diffText, testResult, lintResult, undefined, lang);
     const result = await reviewBatch(repoDir, prompt, pr, model);
     if (result) {
       logSuccess(
@@ -432,6 +450,7 @@ export async function runCodexReview(
       const prompt = buildPrompt(
         pr, meta, batch, testResult, lintResult,
         { current: i + 1, total: batches.length },
+        lang,
       );
       return reviewBatch(repoDir, prompt, pr, model);
     }),
@@ -456,7 +475,7 @@ export async function runCodexReview(
   // Consolidate per-segment summaries into a single developer-friendly summary
   if (batchResults.length > 1) {
     logStep("Consolidating review summaries...");
-    merged.summary = await consolidateSummaries(merged.summary, repoDir, pr, model);
+    merged.summary = await consolidateSummaries(merged.summary, repoDir, pr, model, lang);
   }
 
   logSuccess(

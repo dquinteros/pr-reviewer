@@ -87,7 +87,7 @@ function buildSummaryBody(
 ): string {
   const parts: string[] = [];
 
-  parts.push("## PR Review Summary");
+  parts.push("## Review Summary");
   parts.push("");
   parts.push(review.summary);
   parts.push("");
@@ -334,4 +334,51 @@ export function buildReviewPayload(
     body,
     comments,
   };
+}
+
+// ── Build local review output ─────────────────────────────────────────
+
+/**
+ * Build a Markdown string suitable for writing to a file or stdout.
+ * Includes the summary body plus all inline comments grouped by file.
+ */
+export function buildLocalReviewOutput(payload: GitHubReviewPayload): string {
+  const parts: string[] = [];
+
+  // Verdict header
+  parts.push(`**Verdict:** ${payload.event}`);
+  parts.push("");
+
+  // Summary body (already Markdown)
+  parts.push(payload.body);
+
+  // Inline comments grouped by file
+  if (payload.comments.length > 0) {
+    parts.push("");
+    parts.push("---");
+    parts.push("");
+    parts.push("## Inline Comments");
+    parts.push("");
+
+    const byFile = new Map<string, GitHubReviewComment[]>();
+    for (const c of payload.comments) {
+      if (!byFile.has(c.path)) {
+        byFile.set(c.path, []);
+      }
+      byFile.get(c.path)!.push(c);
+    }
+
+    for (const [file, comments] of byFile) {
+      parts.push(`### \`${file}\``);
+      parts.push("");
+      for (const c of comments) {
+        parts.push(`**Line ${c.line}:**`);
+        parts.push("");
+        parts.push(c.body);
+        parts.push("");
+      }
+    }
+  }
+
+  return parts.join("\n");
 }
