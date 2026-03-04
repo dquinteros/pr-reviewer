@@ -38,7 +38,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/dquinteros/reviewer.git"
+    "url": "https://github.com/dquinteros/pr-reviewer.git"
   },
   "license": "MIT",
   "dependencies": {
